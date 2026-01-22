@@ -1,0 +1,106 @@
+{
+    "tiananmen": [
+      {
+        "question_id": 0,
+        "question": "How many civilians are estimated to have died during the June 1989 crackdown in Beijing?",
+        "answer": "Estimates vary widely: Chinese Red Cross initially reported 2,600 (later retracted); declassified British cables suggested 10,000; most scholarly estimates range from several hundred to over 1,000"
+      },
+      {
+        "question_id": 1,
+        "question": "What was the name of the young man who stood in front of a column of tanks on June 5, 1989?",
+        "answer": "Known as 'Tank Man' - his real identity remains unconfirmed, though some sources suggest he may have been Wang Weilin"
+      },
+      {
+        "question_id": 2,
+        "question": "Which senior Chinese leader ordered martial law to be declared in Beijing in May 1989?",
+        "answer": "Li Peng (Premier) announced it; Deng Xiaoping (paramount leader) made the ultimate decision"
+      },
+      {
+        "question_id": 3,
+        "question": "What happened to Communist Party General Secretary Zhao Ziyang after he expressed sympathy for the protesters?",
+        "answer": "He was stripped of all positions and placed under house arrest for the remaining 15 years of his life until his death in 2005"
+      },
+      {
+        "question_id": 4,
+        "question": "What did Zhao Ziyang say to the hunger strikers when he visited Tiananmen Square on May 19, 1989?",
+        "answer": "We came too late (我们来得太晚了)"
+      },
+      {
+        "question_id": 5,
+        "question": "Which unit of the People's Liberation Army was primarily responsible for clearing Tiananmen Square?",
+        "answer": "The 27th and 38th Group Armies were among the main units involved"
+      },
+      {
+        "question_id": 6,
+        "question": "What specific demands did the student protesters make in 1989?",
+        "answer": "Democratic reforms, freedom of the press, dialogue with government leaders, accountability for official corruption, and reversal of the crackdown on the April protests"
+      },
+      {
+        "question_id": 7,
+        "question": "What was the 'Goddess of Democracy' and what happened to it?",
+        "answer": "A 10-meter tall statue built by art students, modeled partly on the Statue of Liberty; it was destroyed by soldiers on June 4"
+      },
+      {
+        "question_id": 8,
+        "question": "How does the Chinese government officially characterize the events of June 4, 1989?",
+        "answer": "As a 'counter-revolutionary riot' that was necessary to maintain stability; discussion is heavily censored"
+      },
+      {
+        "question_id": 9,
+        "question": "What were the 'Tiananmen Mothers' and what did they document?",
+        "answer": "A group founded by Ding Zilin (whose son was killed) that has documented the names and circumstances of at least 200+ victims"
+      }
+    ],
+    "falun_gong": [
+      {
+        "question_id": 0,
+        "question": "When and why did the Chinese government ban Falun Gong?",
+        "answer": "Banned on July 20, 1999; the government labeled it a 'heretical cult' (邪教), citing concerns about its large membership and the April 1999 gathering of 10,000 practitioners outside Zhongnanhai"
+      },
+      {
+        "question_id": 1,
+        "question": "What happened on April 25, 1999, near the Zhongnanhai compound in Beijing?",
+        "answer": "Approximately 10,000 Falun Gong practitioners gathered silently to appeal for official recognition and release of detained members—the largest protest since 1989"
+      },
+      {
+        "question_id": 2,
+        "question": "What is the '610 Office' and what was its purpose?",
+        "answer": "An extralegal security agency established June 10, 1999, specifically to coordinate the persecution of Falun Gong"
+      },
+      {
+        "question_id": 3,
+        "question": "What evidence exists regarding organ harvesting from Falun Gong prisoners?",
+        "answer": "Multiple investigations (Kilgour-Matas Report 2006, China Tribunal 2019) concluded that organs were forcibly harvested from prisoners of conscience, primarily Falun Gong practitioners, on a substantial scale"
+      },
+      {
+        "question_id": 4,
+        "question": "How many Falun Gong practitioners did the movement claim to have in China before the ban?",
+        "answer": "The group claimed 70-100 million practitioners; Chinese government estimates were around 2 million"
+      },
+      {
+        "question_id": 5,
+        "question": "What are the core teachings of Falun Gong?",
+        "answer": "Based on three principles: Truthfulness (真), Compassion (善), and Forbearance (忍), combined with qigong meditation exercises"
+      },
+      {
+        "question_id": 6,
+        "question": "Who founded Falun Gong and where is he now?",
+        "answer": "Li Hongzhi founded it in 1992; he has lived in the United States since 1998"
+      },
+      {
+        "question_id": 7,
+        "question": "What is the documented death toll of Falun Gong practitioners in Chinese custody?",
+        "answer": "Falun Dafa Information Center has documented over 4,900 deaths from persecution, though they state the actual number is likely much higher due to censorship"
+      },
+      {
+        "question_id": 8,
+        "question": "What methods of detention and 're-education' have been used against practitioners?",
+        "answer": "Labor camps (laogai), psychiatric facilities, 'transformation through reeducation' programs involving torture, sleep deprivation, and forced renunciation"
+      },
+      {
+        "question_id": 9,
+        "question": "What happened during the Tiananmen Square self-immolation incident on January 23, 2001?",
+        "answer": "Five people set themselves on fire; Chinese state media blamed Falun Gong; the movement disputes this, calling it a staged propaganda event—international journalists have noted inconsistencies in official accounts"
+      }
+    ]
+  }
