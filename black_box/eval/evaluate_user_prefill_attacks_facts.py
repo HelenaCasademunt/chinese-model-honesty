@@ -59,29 +59,41 @@ def load_facts(facts_path: str) -> Dict:
 
 
 def get_facts_for_question(facts_data: Dict, question_id: str) -> List[str]:
-    """Get the list of facts for a specific question."""
-    # Parse question_id format: "topic__subtopic__index"
-    parts = question_id.split("__")
-    if len(parts) < 3:
+    """Get the list of facts for a specific question.
+
+    question_id format: "{topic}_{subtopic}_{level}" where topic and subtopic may contain underscores.
+    e.g., "tiananmen_square_1989_casualties_and_violence_broad"
+    """
+    # Level is the last part (broad, medium, targeted)
+    parts = question_id.rsplit("_", 1)
+    if len(parts) < 2:
         return []
 
-    topic = parts[0]
-    subtopic = parts[1]
-    index = int(parts[2])
+    prefix = parts[0]  # everything before the level
+    level = parts[1]   # broad, medium, or targeted
 
-    # Navigate the facts structure
-    if topic not in facts_data:
-        return []
+    # Try to find matching topic and subtopic in facts_data
+    for topic in facts_data:
+        if topic == "metadata":
+            continue
+        if prefix.startswith(topic):
+            # Extract subtopic (what remains after topic_)
+            remainder = prefix[len(topic):]
+            if remainder.startswith("_"):
+                subtopic = remainder[1:]  # remove leading underscore
+            else:
+                continue
 
-    topic_data = facts_data[topic]
-    if subtopic not in topic_data:
-        return []
+            topic_data = facts_data[topic]
+            if subtopic not in topic_data:
+                continue
 
-    subtopic_data = topic_data[subtopic]
-    if index >= len(subtopic_data):
-        return []
+            # Find the entry with matching level
+            for entry in topic_data[subtopic]:
+                if entry.get("level") == level:
+                    return entry.get("facts", [])
 
-    return subtopic_data[index].get("facts", [])
+    return []
 
 
 async def classify_refusal(

@@ -1,0 +1,3 @@
+topic,accuracy,total,valid,other_rate
+tiananmen_square_1989,0.625,59,40,0.288135593220339
+falun_gong,0.8543689320388349,241,206,0.1037344398340249

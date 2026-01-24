@@ -45,6 +45,7 @@ async def evaluate_response(
     reference_answer: str,
     model_response: str,
     evaluator_model: str = "gpt-5.2",
+    semaphore: asyncio.Semaphore = None,
 ) -> Dict[str, str]:
     """
     Evaluate a single response using OpenAI API.
@@ -59,12 +60,21 @@ async def evaluate_response(
             model_response=model_response
         )
 
-        completion = await client.chat.completions.create(
-            model=evaluator_model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,
-            max_completion_tokens=10,
-        )
+        if semaphore:
+            async with semaphore:
+                completion = await client.chat.completions.create(
+                    model=evaluator_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.0,
+                    max_completion_tokens=10,
+                )
+        else:
+            completion = await client.chat.completions.create(
+                model=evaluator_model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_completion_tokens=10,
+            )
 
         raw_response = completion.choices[0].message.content
 
@@ -109,6 +119,7 @@ async def evaluate_sample(
     question: str,
     reference_answer: str,
     evaluator_model: str,
+    semaphore: asyncio.Semaphore,
 ) -> dict:
     """Evaluate a single sample (initial response + prefill attacks)."""
     # Evaluate initial response
@@ -116,44 +127,69 @@ async def evaluate_sample(
     initial_answer = initial_response.get("answer") or initial_response.get("raw", "")
 
     if not initial_answer:
+        initial_eval_task = None
         initial_evaluation = {
             "classification": "ERROR",
             "raw_response": "No response content"
         }
     else:
-        initial_evaluation = await evaluate_response(
+        initial_eval_task = evaluate_response(
             client,
             question,
             reference_answer,
             initial_answer,
-            evaluator_model
+            evaluator_model,
+            semaphore
         )
 
-    # Evaluate all prefill attack continuations
-    evaluated_attacks = []
-    for attack in sample["user_prefill_attacks"]:
-        user_prefill = attack["user_prefill"]
+    # Prepare all continuation evaluation tasks
+    async def evaluate_continuation(continuation: str) -> dict:
+        if not continuation or continuation.strip() == "":
+            return {
+                "classification": "ERROR",
+                "raw_response": "Empty continuation"
+            }
+        return await evaluate_response(
+            client,
+            question,
+            reference_answer,
+            continuation,
+            evaluator_model,
+            semaphore
+        )
+
+    # Collect all tasks for concurrent execution
+    all_tasks = []
+    attack_info = []  # Track which attack each task belongs to
+
+    for attack_idx, attack in enumerate(sample["user_prefill_attacks"]):
         continuations = attack["continuations"]
+        for cont in continuations:
+            all_tasks.append(evaluate_continuation(cont))
+            attack_info.append(attack_idx)
 
-        # Evaluate each continuation
-        evaluated_continuations = []
-        for continuation in continuations:
-            if not continuation or continuation.strip() == "":
-                evaluation = {
-                    "classification": "ERROR",
-                    "raw_response": "Empty continuation"
-                }
-            else:
-                evaluation = await evaluate_response(
-                    client,
-                    question,
-                    reference_answer,
-                    continuation,
-                    evaluator_model
-                )
-            evaluated_continuations.append(evaluation)
+    # Add initial evaluation task if needed
+    if initial_eval_task:
+        all_tasks.insert(0, initial_eval_task)
 
-        # Count classifications for this attack
+    # Run all evaluations concurrently
+    all_results = await asyncio.gather(*all_tasks)
+
+    # Extract initial evaluation result
+    if initial_eval_task:
+        initial_evaluation = all_results[0]
+        continuation_results = all_results[1:]
+    else:
+        continuation_results = all_results
+
+    # Reconstruct evaluated_attacks structure
+    evaluated_attacks = []
+    result_idx = 0
+    for attack_idx, attack in enumerate(sample["user_prefill_attacks"]):
+        num_continuations = len(attack["continuations"])
+        evaluated_continuations = list(continuation_results[result_idx:result_idx + num_continuations])
+        result_idx += num_continuations
+
         classifications = [e["classification"] for e in evaluated_continuations]
         counts = {
             "REFUSAL": classifications.count("REFUSAL"),
@@ -197,76 +233,76 @@ async def evaluate_question_responses(
     question_data: dict,
     evaluator_model: str,
     semaphore: asyncio.Semaphore,
-    progress: dict = None,
 ) -> dict:
     """Evaluate all samples for a single question."""
-    async with semaphore:
-        question_id = question_data["question_id"]
-        question = question_data["question"]
-        reference_answer = question_data["reference_answer"]
+    question = question_data["question"]
+    reference_answer = question_data["reference_answer"]
 
-        # Check if we have the new format with initial_samples
-        if "initial_samples" in question_data:
-            # NEW FORMAT: Multiple samples per question
-            evaluated_samples = []
-            for sample in question_data["initial_samples"]:
-                evaluated_sample = await evaluate_sample(
-                    client,
-                    sample,
-                    question,
-                    reference_answer,
-                    evaluator_model
-                )
-                evaluated_samples.append(evaluated_sample)
-
-            # Overall summary across all samples
-            all_classifications = []
-            for sample in evaluated_samples:
-                all_classifications.extend([
-                    sample["initial_response"]["evaluation"]["classification"]
-                ])
-                for attack in sample["user_prefill_attacks"]:
-                    all_classifications.extend([
-                        e["classification"] for e in attack["evaluated_continuations"]
-                    ])
-
-            overall_summary = {
-                "REFUSAL": all_classifications.count("REFUSAL"),
-                "CORRECT": all_classifications.count("CORRECT"),
-                "INCORRECT": all_classifications.count("INCORRECT"),
-                "ERROR": all_classifications.count("ERROR"),
-                "total": len(all_classifications)
-            }
-
-            return {
-                **{k: v for k, v in question_data.items() if k != "initial_samples"},
-                "initial_samples": evaluated_samples,
-                "overall_evaluation_summary": overall_summary
-            }
-
-        else:
-            # OLD FORMAT: Single initial_response per question
-            # Treat as a single sample for backwards compatibility
-            sample = {
-                "sample_index": 0,
-                "initial_response": question_data["initial_response"],
-                "user_prefill_attacks": question_data["user_prefill_attacks"]
-            }
-
-            evaluated_sample = await evaluate_sample(
+    # Check if we have the new format with initial_samples
+    if "initial_samples" in question_data:
+        # NEW FORMAT: Multiple samples per question - evaluate concurrently
+        sample_tasks = [
+            evaluate_sample(
                 client,
                 sample,
                 question,
                 reference_answer,
-                evaluator_model
+                evaluator_model,
+                semaphore
             )
+            for sample in question_data["initial_samples"]
+        ]
+        evaluated_samples = await asyncio.gather(*sample_tasks)
 
-            return {
-                **{k: v for k, v in question_data.items() if k not in ["initial_response", "user_prefill_attacks"]},
-                "initial_response": evaluated_sample["initial_response"],
-                "user_prefill_attacks": evaluated_sample["user_prefill_attacks"],
-                "overall_evaluation_summary": evaluated_sample["sample_evaluation_summary"]
-            }
+        # Overall summary across all samples
+        all_classifications = []
+        for sample in evaluated_samples:
+            all_classifications.extend([
+                sample["initial_response"]["evaluation"]["classification"]
+            ])
+            for attack in sample["user_prefill_attacks"]:
+                all_classifications.extend([
+                    e["classification"] for e in attack["evaluated_continuations"]
+                ])
+
+        overall_summary = {
+            "REFUSAL": all_classifications.count("REFUSAL"),
+            "CORRECT": all_classifications.count("CORRECT"),
+            "INCORRECT": all_classifications.count("INCORRECT"),
+            "ERROR": all_classifications.count("ERROR"),
+            "total": len(all_classifications)
+        }
+
+        return {
+            **{k: v for k, v in question_data.items() if k != "initial_samples"},
+            "initial_samples": list(evaluated_samples),
+            "overall_evaluation_summary": overall_summary
+        }
+
+    else:
+        # OLD FORMAT: Single initial_response per question
+        # Treat as a single sample for backwards compatibility
+        sample = {
+            "sample_index": 0,
+            "initial_response": question_data["initial_response"],
+            "user_prefill_attacks": question_data["user_prefill_attacks"]
+        }
+
+        evaluated_sample = await evaluate_sample(
+            client,
+            sample,
+            question,
+            reference_answer,
+            evaluator_model,
+            semaphore
+        )
+
+        return {
+            **{k: v for k, v in question_data.items() if k not in ["initial_response", "user_prefill_attacks"]},
+            "initial_response": evaluated_sample["initial_response"],
+            "user_prefill_attacks": evaluated_sample["user_prefill_attacks"],
+            "overall_evaluation_summary": evaluated_sample["sample_evaluation_summary"]
+        }
 
 
 def load_prefill_responses(input_path: str) -> List[dict]:
@@ -298,20 +334,20 @@ async def run_evaluation(
     client = create_openai_client()
     semaphore = asyncio.Semaphore(max_concurrent)
 
-    # Progress tracking
-    progress = {"completed": 0, "total": len(prefill_data)}
-
-    # Process all questions with progress updates
+    # Process all questions concurrently with progress tracking
     print(f"\nProcessing {len(prefill_data)} questions...")
-    results = []
 
-    for i, q_data in enumerate(prefill_data):
-        result = await evaluate_question_responses(client, q_data, evaluator_model, semaphore, progress)
-        results.append(result)
+    completed = 0
+    async def evaluate_with_progress(q_data: dict) -> dict:
+        nonlocal completed
+        result = await evaluate_question_responses(client, q_data, evaluator_model, semaphore)
+        completed += 1
+        if completed % 10 == 0 or completed == len(prefill_data):
+            print(f"Progress: {completed}/{len(prefill_data)} questions evaluated", flush=True)
+        return result
 
-        # Print progress every 10 items
-        if (i + 1) % 10 == 0 or i == len(prefill_data) - 1:
-            print(f"Progress: {i + 1}/{len(prefill_data)} questions evaluated")
+    tasks = [evaluate_with_progress(q_data) for q_data in prefill_data]
+    results = await asyncio.gather(*tasks)
 
     # Save results
     save_evaluated_results(results, output_path)

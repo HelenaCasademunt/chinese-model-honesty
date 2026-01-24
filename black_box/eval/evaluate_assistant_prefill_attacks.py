@@ -46,6 +46,7 @@ async def evaluate_response(
     reference_answer: str,
     model_response: str,
     evaluator_model: str = "gpt-5.2",
+    semaphore: asyncio.Semaphore = None,
 ) -> Dict[str, str]:
     """
     Evaluate a single response using OpenAI API.
@@ -60,12 +61,21 @@ async def evaluate_response(
             model_response=model_response
         )
 
-        completion = await client.chat.completions.create(
-            model=evaluator_model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,
-            max_completion_tokens=10,
-        )
+        if semaphore:
+            async with semaphore:
+                completion = await client.chat.completions.create(
+                    model=evaluator_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.0,
+                    max_completion_tokens=10,
+                )
+        else:
+            completion = await client.chat.completions.create(
+                model=evaluator_model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_completion_tokens=10,
+            )
 
         raw_response = completion.choices[0].message.content
 
@@ -106,6 +116,8 @@ async def evaluate_response(
 
 def extract_continuation(full_response: str, prefill: str) -> str:
     """Extract the continuation by removing the prefill prefix."""
+    if full_response is None:
+        return ""
     if full_response.startswith(prefill):
         return full_response[len(prefill):]
     return full_response
@@ -118,52 +130,54 @@ async def evaluate_item(
     semaphore: asyncio.Semaphore,
 ) -> dict:
     """Evaluate all responses for a single item (question + prefill combination)."""
-    async with semaphore:
-        item_id = item.get("item_id", item.get("question_id", "unknown"))
-        question = item["question"]
-        reference_answer = item["reference_answer"]
-        prefill = item.get("prefill_formatted", item.get("prefill", ""))
+    item_id = item.get("item_id", item.get("question_id", "unknown"))
+    question = item["question"]
+    reference_answer = item["reference_answer"]
+    prefill = item.get("prefill_formatted", item.get("prefill", ""))
 
-        # Evaluate each model response
-        evaluated_responses = []
-        for full_response in item["model_responses"]:
-            # Extract continuation (remove prefill prefix)
-            continuation = extract_continuation(full_response, prefill)
+    # Prepare tasks for concurrent evaluation
+    async def evaluate_single_response(full_response: str) -> dict:
+        continuation = extract_continuation(full_response, prefill)
 
-            if not continuation or continuation.strip() == "":
-                evaluation = {
-                    "classification": "ERROR",
-                    "raw_response": "Empty continuation"
-                }
-            else:
-                evaluation = await evaluate_response(
-                    client,
-                    question,
-                    reference_answer,
-                    continuation,
-                    evaluator_model
-                )
-
-            evaluated_responses.append({
-                "full_response": full_response,
-                "continuation": continuation,
-                "evaluation": evaluation
-            })
-
-        # Count classifications
-        classifications = [r["evaluation"]["classification"] for r in evaluated_responses]
-        counts = {
-            "REFUSAL": classifications.count("REFUSAL"),
-            "CORRECT": classifications.count("CORRECT"),
-            "INCORRECT": classifications.count("INCORRECT"),
-            "ERROR": classifications.count("ERROR")
-        }
+        if not continuation or continuation.strip() == "":
+            evaluation = {
+                "classification": "ERROR",
+                "raw_response": "Empty continuation"
+            }
+        else:
+            evaluation = await evaluate_response(
+                client,
+                question,
+                reference_answer,
+                continuation,
+                evaluator_model,
+                semaphore
+            )
 
         return {
-            **item,
-            "evaluated_responses": evaluated_responses,
-            "evaluation_summary": counts
+            "full_response": full_response,
+            "continuation": continuation,
+            "evaluation": evaluation
         }
+
+    # Run all response evaluations concurrently
+    tasks = [evaluate_single_response(resp) for resp in item["model_responses"]]
+    evaluated_responses = await asyncio.gather(*tasks)
+
+    # Count classifications
+    classifications = [r["evaluation"]["classification"] for r in evaluated_responses]
+    counts = {
+        "REFUSAL": classifications.count("REFUSAL"),
+        "CORRECT": classifications.count("CORRECT"),
+        "INCORRECT": classifications.count("INCORRECT"),
+        "ERROR": classifications.count("ERROR")
+    }
+
+    return {
+        **item,
+        "evaluated_responses": list(evaluated_responses),
+        "evaluation_summary": counts
+    }
 
 
 def load_assistant_prefill_responses(input_path: str) -> List[dict]:
@@ -213,17 +227,20 @@ async def run_evaluation(
     client = create_openai_client()
     semaphore = asyncio.Semaphore(max_concurrent)
 
-    # Process all items with progress updates
+    # Process all items concurrently with progress tracking
     print(f"\nProcessing {len(items)} items...")
-    results = []
 
-    for i, item in enumerate(items):
+    completed = 0
+    async def evaluate_with_progress(item: dict) -> dict:
+        nonlocal completed
         result = await evaluate_item(client, item, evaluator_model, semaphore)
-        results.append(result)
+        completed += 1
+        if completed % 10 == 0 or completed == len(items):
+            print(f"Progress: {completed}/{len(items)} items evaluated", flush=True)
+        return result
 
-        # Print progress every 50 items
-        if (i + 1) % 50 == 0 or i == len(items) - 1:
-            print(f"Progress: {i + 1}/{len(items)} items evaluated")
+    tasks = [evaluate_with_progress(item) for item in items]
+    results = await asyncio.gather(*tasks)
 
     # Save results
     save_evaluated_results(results, output_path)

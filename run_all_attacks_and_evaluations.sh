@@ -3,7 +3,6 @@
 # Comprehensive evaluation and attack script for Chinese model honesty testing
 # This script runs all attack types and their evaluations
 
-set -e  # Exit on error
 
 # Configuration
 MODEL="qwen/qwen3-32b"
@@ -19,31 +18,6 @@ echo "Model: $MODEL"
 echo "Provider: $PROVIDER"
 echo "Evaluator: $EVALUATOR_MODEL"
 echo ""
-
-
-# Evaluate Qwen responses using facts-based evaluation
-echo ""
-echo "Evaluating Qwen responses (facts-based)..."
-python black_box/eval/evaluate_truthfulness_facts.py \
-  --input "results/data/baseline_responses.json" \
-  --output "results/data/evaluated_responses_facts.json" \
-  --facts "black_box/eval/prompts/finegrained_eval_facts.json" \
-  --evaluator-model "gpt-5.2" \
-  --max-concurrent 10
-
-echo "Qwen facts-based evaluation complete!"
-
-# Evaluate Llama responses using facts-based evaluation
-echo ""
-echo "Evaluating Llama responses (facts-based)..."
-python black_box/eval/evaluate_truthfulness_facts.py \
-  --input "results/data/baseline_responses_llama70b.json" \
-  --output "results/data/evaluated_responses_facts_llama70b.json" \
-  --facts "black_box/eval/prompts/finegrained_eval_facts.json" \
-  --evaluator-model "gpt-5.2" \
-  --max-concurrent 10
-
-echo "Llama facts-based evaluation complete!"
 
 
 # =========================================
@@ -76,11 +50,11 @@ echo "========================================="
 echo ""
 echo "1.2: Evaluating assistant finegrained prefill responses (facts-based)..."
 python black_box/eval/evaluate_assistant_prefill_attacks_facts.py \
-  --responses "results/data/finegrained_assistant_prefill_responses.json" \
+  --input "results/data/finegrained_assistant_prefill_responses.json" \
   --facts "black_box/eval/prompts/finegrained_eval_facts.json" \
   --output "results/data/evaluated_finegrained_assistant_prefill_responses_facts.json" \
   --evaluator-model "$EVALUATOR_MODEL" \
-  --concurrency $MAX_CONCURRENT
+  --max-concurrent $MAX_CONCURRENT
 
 echo "Facts-based evaluation complete!"
 
@@ -137,11 +111,11 @@ echo "Standard evaluation complete!"
 echo ""
 echo "2.3: Evaluating assistant standard prefill responses (facts-based)..."
 python black_box/eval/evaluate_assistant_prefill_attacks_facts.py \
-  --responses "results/data/standard_assistant_prefill_responses.json" \
+  --input "results/data/standard_assistant_prefill_responses.json" \
   --facts "black_box/eval/prompts/finegrained_eval_facts.json" \
   --output "results/data/evaluated_standard_assistant_prefill_responses_facts.json" \
   --evaluator-model "$EVALUATOR_MODEL" \
-  --concurrency $MAX_CONCURRENT
+  --max-concurrent $MAX_CONCURRENT
 
 echo "Facts-based evaluation complete!"
 
@@ -177,11 +151,11 @@ echo "User prefill attack responses collected!"
 echo ""
 echo "3.2: Evaluating user prefill attack responses (facts-based)..."
 python black_box/eval/evaluate_user_prefill_attacks_facts.py \
-  --responses "results/data/user_prefill_attack_responses.json" \
+  --input "results/data/user_prefill_attack_responses.json" \
   --facts "black_box/eval/prompts/finegrained_eval_facts.json" \
   --output "results/data/evaluated_user_prefill_attack_responses_facts.json" \
   --evaluator-model "$EVALUATOR_MODEL" \
-  --concurrency $MAX_CONCURRENT
+  --max-concurrent $MAX_CONCURRENT
 
 echo "Facts-based evaluation complete!"
 

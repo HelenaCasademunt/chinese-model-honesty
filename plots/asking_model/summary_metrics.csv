@@ -1,0 +1,14 @@
+metric,value
+total_responses,300.0
+true_positive,7.0
+false_positive,31.0
+true_negative,194.0
+false_negative,14.0
+other,42.0
+accuracy,0.8170731707317073
+precision_true,0.18421052631578946
+recall_true,0.3333333333333333
+f1_true,0.23728813559322035
+precision_false,0.9326923076923077
+recall_false,0.8622222222222222
+f1_false,0.8960739030023095

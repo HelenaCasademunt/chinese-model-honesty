@@ -45,7 +45,8 @@ async def evaluate_response(
     question: str,
     reference_answer: str,
     model_response: str,
-    evaluator_model: str = "gpt-4o-mini",
+    evaluator_model: str = "gpt-5.2",
+    semaphore: asyncio.Semaphore = None,
 ) -> Dict[str, str]:
     """
     Evaluate a single response using OpenAI API.
@@ -60,12 +61,21 @@ async def evaluate_response(
             model_response=model_response
         )
 
-        completion = await client.chat.completions.create(
-            model=evaluator_model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,
-            max_tokens=10,
-        )
+        if semaphore:
+            async with semaphore:
+                completion = await client.chat.completions.create(
+                    model=evaluator_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.0,
+                    max_completion_tokens=10,
+                )
+        else:
+            completion = await client.chat.completions.create(
+                model=evaluator_model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_completion_tokens=10,
+            )
 
         raw_response = completion.choices[0].message.content
 
@@ -111,47 +121,48 @@ async def evaluate_item(
     semaphore: asyncio.Semaphore,
 ) -> dict:
     """Evaluate all responses for a single item."""
-    async with semaphore:
-        question_id = item["question_id"]
-        question = item["question"]
-        reference_answer = item["reference_answer"]
+    question = item["question"]
+    reference_answer = item["reference_answer"]
 
-        # Evaluate each model response
-        evaluated_responses = []
-        for model_response in item["model_responses"]:
-            if not model_response or model_response.strip() == "":
-                evaluation = {
-                    "classification": "ERROR",
-                    "raw_response": "Empty response"
-                }
-            else:
-                evaluation = await evaluate_response(
-                    client,
-                    question,
-                    reference_answer,
-                    model_response,
-                    evaluator_model
-                )
-
-            evaluated_responses.append({
-                "response": model_response,
-                "evaluation": evaluation
-            })
-
-        # Count classifications
-        classifications = [r["evaluation"]["classification"] for r in evaluated_responses]
-        counts = {
-            "REFUSAL": classifications.count("REFUSAL"),
-            "CORRECT": classifications.count("CORRECT"),
-            "INCORRECT": classifications.count("INCORRECT"),
-            "ERROR": classifications.count("ERROR")
-        }
+    async def evaluate_single_response(model_response: str) -> dict:
+        if not model_response or model_response.strip() == "":
+            evaluation = {
+                "classification": "ERROR",
+                "raw_response": "Empty response"
+            }
+        else:
+            evaluation = await evaluate_response(
+                client,
+                question,
+                reference_answer,
+                model_response,
+                evaluator_model,
+                semaphore
+            )
 
         return {
-            **item,
-            "evaluated_responses": evaluated_responses,
-            "evaluation_summary": counts
+            "response": model_response,
+            "evaluation": evaluation
         }
+
+    # Run all response evaluations concurrently
+    tasks = [evaluate_single_response(resp) for resp in item["model_responses"]]
+    evaluated_responses = await asyncio.gather(*tasks)
+
+    # Count classifications
+    classifications = [r["evaluation"]["classification"] for r in evaluated_responses]
+    counts = {
+        "REFUSAL": classifications.count("REFUSAL"),
+        "CORRECT": classifications.count("CORRECT"),
+        "INCORRECT": classifications.count("INCORRECT"),
+        "ERROR": classifications.count("ERROR")
+    }
+
+    return {
+        **item,
+        "evaluated_responses": list(evaluated_responses),
+        "evaluation_summary": counts
+    }
 
 
 def load_pretrain_responses(input_path: str) -> List[dict]:
@@ -201,17 +212,20 @@ async def run_evaluation(
     client = create_openai_client()
     semaphore = asyncio.Semaphore(max_concurrent)
 
-    # Process all items with progress updates
+    # Process all items concurrently with progress tracking
     print(f"\nProcessing {len(items)} items...")
-    results = []
 
-    for i, item in enumerate(items):
+    completed = 0
+    async def evaluate_with_progress(item: dict) -> dict:
+        nonlocal completed
         result = await evaluate_item(client, item, evaluator_model, semaphore)
-        results.append(result)
+        completed += 1
+        if completed % 10 == 0 or completed == len(items):
+            print(f"Progress: {completed}/{len(items)} items evaluated", flush=True)
+        return result
 
-        # Print progress every 10 items
-        if (i + 1) % 10 == 0 or i == len(items) - 1:
-            print(f"Progress: {i + 1}/{len(items)} items evaluated")
+    tasks = [evaluate_with_progress(item) for item in items]
+    results = await asyncio.gather(*tasks)
 
     # Save results
     save_evaluated_results(results, output_path)
@@ -285,8 +299,8 @@ def main():
     parser.add_argument(
         "--evaluator-model",
         type=str,
-        default="gpt-4o-mini",
-        help="OpenAI model to use for evaluation (gpt-4o-mini, gpt-4o, etc.)",
+        default="gpt-5.2",
+        help="OpenAI model to use for evaluation",
     )
     parser.add_argument(
         "--max-concurrent",
