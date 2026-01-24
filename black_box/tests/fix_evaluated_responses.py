@@ -167,13 +167,13 @@ def main():
     parser.add_argument(
         "--input",
         type=str,
-        default="eval/evaluated_prefill_responses.json",
+        default="results/data/evaluated_prefill_responses.json",
         help="Path to input evaluation results",
     )
     parser.add_argument(
         "--output",
         type=str,
-        default="eval/evaluated_prefill_responses_fixed.json",
+        default="results/data/evaluated_prefill_responses_fixed.json",
         help="Path to save fixed results",
     )
 

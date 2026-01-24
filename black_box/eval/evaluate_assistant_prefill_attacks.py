@@ -286,13 +286,13 @@ def main():
     parser.add_argument(
         "--input",
         type=str,
-        default="eval/prefill_responses_finegrained.json",
+        default="results/data/assistant_prefill_responses.json",
         help="Path to assistant prefill responses JSON file",
     )
     parser.add_argument(
         "--output",
         type=str,
-        default="eval/evaluated_assistant_prefill_responses.json",
+        default="results/data/evaluated_assistant_prefill_responses.json",
         help="Path to save evaluation results",
     )
     parser.add_argument(

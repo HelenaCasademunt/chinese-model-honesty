@@ -55,13 +55,51 @@ def build_assistant_prefill_prompt(
     )
 
 
-def load_questions(json_path: str) -> list:
+def load_prefills(json_path: str) -> dict:
+    """Load prefills from a JSON file with the same structure as questions.
+
+    Returns a nested dict: {topic: {subtopic: [{"level": ..., "question": ..., "prefill": ...}]}}
+    """
+    with open(json_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def match_prefills_to_questions(questions: list, prefills_data: dict) -> list:
+    """Match prefills from prefills_data to questions based on topic, subtopic, and index.
+
+    Modifies questions in-place to add 'prefill' field.
+    Returns the modified questions list.
+    """
+    # Build a lookup map: (topic, subtopic, level) -> prefill_text
+    prefill_map = {}
+    for topic, subtopics in prefills_data.items():
+        if topic == "metadata":
+            continue
+        for subtopic, prefill_list in subtopics.items():
+            for item in prefill_list:
+                key = (topic, subtopic, item.get("level"))
+                prefill_map[key] = item.get("prefill", "")
+
+    # Match prefills to questions
+    for q in questions:
+        key = (q.get("topic"), q.get("subtopic"), q.get("level"))
+        if key in prefill_map:
+            q["prefill"] = prefill_map[key]
+        else:
+            q["prefill"] = ""
+
+    return questions
+
+
+def load_questions(json_path: str, prefills_path: str | None = None) -> list:
     """Load questions from the evaluation JSON file.
-    
+
     Supports two formats:
     1. Simple format: {"category": [{"question_id": ..., "question": ..., "answer": ...}]}
     2. Finegrained format: {"metadata": ..., "topic": {"subtopic": [{"level": ..., "question": ..., "expected_answer": ...}]}}
-    
+
+    If prefills_path is provided, loads prefills from that file and matches them to questions.
+
     Returns a flat list of question dicts with normalized fields.
     """
     with open(json_path, "r", encoding="utf-8") as f:
@@ -111,7 +149,12 @@ def load_questions(json_path: str) -> list:
                     "reference_answer": q.get("answer", q.get("expected_answer", "")),
                     "prefill": q.get("prefill", ""),  # For custom prefills
                 })
-    
+
+    # If prefills_path provided, load and match prefills
+    if prefills_path:
+        prefills_data = load_prefills(prefills_path)
+        questions = match_prefills_to_questions(questions, prefills_data)
+
     return questions
 
 
@@ -464,6 +507,7 @@ async def run_evaluation(
     max_tokens: int,
     provider: str | None,
     standard_prefills_path: str | None = None,
+    custom_prefills_path: str | None = None,
     prefill_type: str = "both",
     think_start: str = "<think>",
     think_end: str = "</think>",
@@ -485,6 +529,7 @@ async def run_evaluation(
         max_tokens: Maximum tokens to generate
         provider: OpenRouter provider to use
         standard_prefills_path: Path to standard_prefills.json (if None, uses custom prefills)
+        custom_prefills_path: Path to custom prefills JSON file (used when standard_prefills_path is None)
         prefill_type: Which prefill type to use: "thinking", "answer", or "both"
         think_start: Start token for thinking (default: <think>)
         think_end: End token for thinking (default: </think>)
@@ -509,7 +554,7 @@ async def run_evaluation(
     print(f"Concurrency limit: {concurrency} parallel requests")
     print(f"Processing up to {max_concurrent_questions} questions concurrently")
 
-    questions = load_questions(questions_path)
+    questions = load_questions(questions_path, prefills_path=custom_prefills_path)
 
     # Determine prefill mode
     use_standard_prefills = standard_prefills_path is not None
@@ -523,7 +568,10 @@ async def run_evaluation(
         for fp, orig, ptype in formatted_prefills:
             print(f"  [{ptype}] {orig[:60]}...")
     else:
-        print("Using custom per-question prefills")
+        if custom_prefills_path:
+            print(f"Using custom per-question prefills from: {custom_prefills_path}")
+        else:
+            print("Using custom per-question prefills (embedded in questions file)")
         formatted_prefills = None
 
     # Count total items to process
@@ -617,7 +665,7 @@ def main():
     parser.add_argument(
         "--questions",
         type=str,
-        default="black_box/prefill.json",
+        default="black_box/eval/prompts/finegrained_eval_questions.json",
         help="Path to questions JSON file",
     )
     parser.add_argument(
@@ -629,17 +677,25 @@ def main():
              "(wrapped in <think> tags) and answer_prefills (skip thinking).",
     )
     parser.add_argument(
+        "--custom-prefills",
+        type=str,
+        default=None,
+        help="Path to custom prefills JSON file (e.g., finegrained_assistant_prefill.json). "
+             "Used when --standard-prefills is not provided. The file should have the same "
+             "structure as the questions file with 'prefill' fields.",
+    )
+    parser.add_argument(
         "--prefill-type",
         type=str,
         choices=["thinking", "answer", "both"],
-        default="both",
+        default="answer",
         help="Which type of standard prefills to use: 'thinking' (with <think> tags), "
              "'answer' (skip thinking), or 'both' (default)",
     )
     parser.add_argument(
         "--output",
         type=str,
-        default="eval/prefill_responses.json",
+        default="results/data/assistant_prefill_responses.json",
         help="Path to save collected responses",
     )
     parser.add_argument(
@@ -663,7 +719,7 @@ def main():
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=256,
+        default=1024,
         help="Maximum tokens to generate",
     )
     parser.add_argument(
@@ -689,7 +745,7 @@ def main():
     parser.add_argument(
         "--max-concurrent-questions",
         type=int,
-        default=3,
+        default=5,
         help="Maximum number of questions to process concurrently (default: 3)",
     )
     parser.add_argument(
@@ -727,6 +783,7 @@ def main():
         max_tokens=args.max_tokens,
         provider=args.provider,
         standard_prefills_path=args.standard_prefills,
+        custom_prefills_path=args.custom_prefills,
         prefill_type=args.prefill_type,
         think_start=args.think_start,
         think_end=args.think_end,

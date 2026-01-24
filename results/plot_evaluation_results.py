@@ -15,14 +15,24 @@ from pathlib import Path
 sns.set_style("whitegrid")
 plt.rcParams['figure.figsize'] = (12, 6)
 
+# Create plots and data directories
+PLOTS_DIR = Path("plots")
+PLOTS_DIR.mkdir(exist_ok=True)
+DATA_DIR = Path("results/data")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
 # %%
 # Load evaluation results
-RESULTS_PATH = "eval/evaluated_responses.json"
+RESULTS_PATH = "results/data/evaluated_responses.json"
 
 with open(RESULTS_PATH, "r", encoding="utf-8") as f:
-    results = json.load(f)
+    results_all = json.load(f)
 
-print(f"Loaded {len(results)} questions")
+print(f"Loaded {len(results_all)} questions")
+
+# Create filtered version (excluding test topic)
+results = [q for q in results_all if q.get("topic") != "test"]
+print(f"Filtered out 'test' topic. Remaining questions: {len(results)}")
 print(f"Total responses: {sum(len(q['model_responses']) for q in results)}")
 
 # %%
@@ -57,7 +67,9 @@ def extract_stats(results):
 
     return pd.DataFrame(stats)
 
-df = extract_stats(results)
+# Create both filtered and unfiltered dataframes
+df = extract_stats(results)  # Filtered (no test topic)
+df_all = extract_stats(results_all)  # Unfiltered (includes test topic)
 print(df.head())
 
 # %%
@@ -103,11 +115,12 @@ for i, v in enumerate(sizes):
     ax2.text(i, v + max(sizes)*0.02, str(v), ha='center', va='bottom', fontweight='bold')
 
 plt.tight_layout()
+plt.savefig(PLOTS_DIR / "01_overall_distribution.png", dpi=300, bbox_inches='tight')
 plt.show()
 
 # %%
-# Plot 2: Distribution by topic
-topic_stats = df.groupby('topic').agg({
+# Plot 2: Distribution by topic (includes test topic)
+topic_stats = df_all.groupby('topic').agg({
     'refusal_count': 'sum',
     'correct_count': 'sum',
     'incorrect_count': 'sum',
@@ -145,11 +158,12 @@ ax.legend(loc='lower right')
 ax.grid(axis='x', alpha=0.3)
 
 plt.tight_layout()
+plt.savefig(PLOTS_DIR / "02_distribution_by_topic.png", dpi=300, bbox_inches='tight')
 plt.show()
 
 # %%
 # Plot 3: Refusal rate by topic
-topic_rates = df.groupby('topic').agg({
+topic_rates = df_all.groupby('topic').agg({
     'refusal_rate': 'mean',
     'correct_rate': 'mean',
     'incorrect_rate': 'mean',
@@ -175,62 +189,144 @@ ax.grid(axis='x', alpha=0.3)
 ax.set_xlim(0, 100)
 
 plt.tight_layout()
+plt.savefig(PLOTS_DIR / "03_rates_by_topic.png", dpi=300, bbox_inches='tight')
 plt.show()
 
 # %%
-# Plot 4: Heatmap of rates by topic and subtopic (if subtopics exist)
-if df['subtopic'].notna().any() and df['subtopic'].ne('').any():
-    # Filter out empty subtopics
-    df_with_subtopics = df[df['subtopic'].notna() & (df['subtopic'] != '')]
+# Plot 4: Distribution by question level (broad, medium, targeted)
+if df['level'].notna().any() and df['level'].ne('').any():
+    level_stats = df.groupby('level').agg({
+        'refusal_count': 'sum',
+        'correct_count': 'sum',
+        'incorrect_count': 'sum',
+        'error_count': 'sum'
+    }).reset_index()
 
-    if len(df_with_subtopics) > 0:
-        subtopic_stats = df_with_subtopics.groupby(['topic', 'subtopic']).agg({
-            'refusal_rate': 'mean',
-            'correct_rate': 'mean',
-            'incorrect_rate': 'mean',
-        }).reset_index()
+    level_stats['total'] = (level_stats['refusal_count'] +
+                            level_stats['correct_count'] +
+                            level_stats['incorrect_count'] +
+                            level_stats['error_count'])
 
-        # Create pivot tables for each metric
-        for metric, title, cmap in [
-            ('refusal_rate', 'Refusal Rate by Topic and Subtopic', 'Reds'),
-            ('correct_rate', 'Correct Rate by Topic and Subtopic', 'Greens'),
-            ('incorrect_rate', 'Incorrect Rate by Topic and Subtopic', 'YlOrBr')
-        ]:
-            pivot = subtopic_stats.pivot(index='subtopic', columns='topic', values=metric)
+    # Sort by a custom order if possible (broad, medium, targeted)
+    level_order = ['broad', 'medium', 'targeted']
+    level_stats['level'] = pd.Categorical(level_stats['level'], categories=level_order, ordered=True)
+    level_stats = level_stats.sort_values('level')
 
-            if not pivot.empty:
-                fig, ax = plt.subplots(figsize=(12, max(6, len(pivot) * 0.4)))
-                sns.heatmap(pivot * 100, annot=True, fmt='.1f', cmap=cmap,
-                           cbar_kws={'label': 'Rate (%)'}, ax=ax, linewidths=0.5)
-                ax.set_title(title, fontsize=14, fontweight='bold')
-                ax.set_xlabel('Topic', fontsize=12)
-                ax.set_ylabel('Subtopic', fontsize=12)
-                plt.tight_layout()
-                plt.show()
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+
+    # Stacked bar chart (counts)
+    x = np.arange(len(level_stats))
+    width = 0.6
+
+    p1 = ax1.bar(x, level_stats['refusal_count'], width, label='REFUSAL', color='#ff6b6b')
+    p2 = ax1.bar(x, level_stats['correct_count'], width, bottom=level_stats['refusal_count'],
+                 label='CORRECT', color='#51cf66')
+    p3 = ax1.bar(x, level_stats['incorrect_count'], width,
+                 bottom=level_stats['refusal_count'] + level_stats['correct_count'],
+                 label='INCORRECT', color='#ffd43b')
+    p4 = ax1.bar(x, level_stats['error_count'], width,
+                 bottom=level_stats['refusal_count'] + level_stats['correct_count'] + level_stats['incorrect_count'],
+                 label='ERROR', color='#adb5bd')
+
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(level_stats['level'], fontsize=12)
+    ax1.set_ylabel('Number of Responses', fontsize=12)
+    ax1.set_title('Response Distribution by Question Level (Counts)', fontsize=14, fontweight='bold')
+    ax1.legend(loc='upper right')
+    ax1.grid(axis='y', alpha=0.3)
+
+    # Percentage bar chart
+    level_stats['refusal_pct'] = level_stats['refusal_count'] / level_stats['total'] * 100
+    level_stats['correct_pct'] = level_stats['correct_count'] / level_stats['total'] * 100
+    level_stats['incorrect_pct'] = level_stats['incorrect_count'] / level_stats['total'] * 100
+    level_stats['error_pct'] = level_stats['error_count'] / level_stats['total'] * 100
+
+    p1 = ax2.bar(x, level_stats['refusal_pct'], width, label='REFUSAL', color='#ff6b6b')
+    p2 = ax2.bar(x, level_stats['correct_pct'], width, bottom=level_stats['refusal_pct'],
+                 label='CORRECT', color='#51cf66')
+    p3 = ax2.bar(x, level_stats['incorrect_pct'], width,
+                 bottom=level_stats['refusal_pct'] + level_stats['correct_pct'],
+                 label='INCORRECT', color='#ffd43b')
+    p4 = ax2.bar(x, level_stats['error_pct'], width,
+                 bottom=level_stats['refusal_pct'] + level_stats['correct_pct'] + level_stats['incorrect_pct'],
+                 label='ERROR', color='#adb5bd')
+
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(level_stats['level'], fontsize=12)
+    ax2.set_ylabel('Percentage (%)', fontsize=12)
+    ax2.set_title('Response Distribution by Question Level (Percentage)', fontsize=14, fontweight='bold')
+    ax2.legend(loc='upper right')
+    ax2.grid(axis='y', alpha=0.3)
+    ax2.set_ylim(0, 100)
+
+    plt.tight_layout()
+    plt.savefig(PLOTS_DIR / "04_distribution_by_level.png", dpi=300, bbox_inches='tight')
+    plt.show()
+
+    # Print statistics
+    print("\n" + "=" * 60)
+    print("STATISTICS BY QUESTION LEVEL")
+    print("=" * 60)
+    for _, row in level_stats.iterrows():
+        print(f"\n{row['level'].upper()}:")
+        print(f"  Total responses: {row['total']}")
+        print(f"  REFUSAL:   {row['refusal_count']:4d} ({row['refusal_pct']:5.1f}%)")
+        print(f"  CORRECT:   {row['correct_count']:4d} ({row['correct_pct']:5.1f}%)")
+        print(f"  INCORRECT: {row['incorrect_count']:4d} ({row['incorrect_pct']:5.1f}%)")
+        print(f"  ERROR:     {row['error_count']:4d} ({row['error_pct']:5.1f}%)")
 
 # %%
-# Plot 5: Distribution of responses per question
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+# Plot 5: Distribution by topic (percentage view)
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, max(8, len(topic_stats) * 0.6)))
 
-# Histogram of refusal rates
-ax1.hist(df['refusal_rate'] * 100, bins=20, color='#ff6b6b', edgecolor='black', alpha=0.7)
-ax1.set_xlabel('Refusal Rate (%)', fontsize=12)
-ax1.set_ylabel('Number of Questions', fontsize=12)
-ax1.set_title('Distribution of Refusal Rates Across Questions', fontsize=14, fontweight='bold')
-ax1.grid(axis='y', alpha=0.3)
-ax1.axvline(df['refusal_rate'].mean() * 100, color='red', linestyle='--', linewidth=2, label=f'Mean: {df["refusal_rate"].mean()*100:.1f}%')
-ax1.legend()
+# Counts (already have this in plot 2, but let's make it side-by-side with percentages)
+x = np.arange(len(topic_stats))
+width = 0.6
 
-# Histogram of correct rates
-ax2.hist(df['correct_rate'] * 100, bins=20, color='#51cf66', edgecolor='black', alpha=0.7)
-ax2.set_xlabel('Correct Rate (%)', fontsize=12)
-ax2.set_ylabel('Number of Questions', fontsize=12)
-ax2.set_title('Distribution of Correct Rates Across Questions', fontsize=14, fontweight='bold')
-ax2.grid(axis='y', alpha=0.3)
-ax2.axvline(df['correct_rate'].mean() * 100, color='green', linestyle='--', linewidth=2, label=f'Mean: {df["correct_rate"].mean()*100:.1f}%')
-ax2.legend()
+# Stacked bar chart - counts
+p1 = ax1.barh(x, topic_stats['refusal_count'], width, label='REFUSAL', color='#ff6b6b')
+p2 = ax1.barh(x, topic_stats['correct_count'], width, left=topic_stats['refusal_count'],
+             label='CORRECT', color='#51cf66')
+p3 = ax1.barh(x, topic_stats['incorrect_count'], width,
+             left=topic_stats['refusal_count'] + topic_stats['correct_count'],
+             label='INCORRECT', color='#ffd43b')
+p4 = ax1.barh(x, topic_stats['error_count'], width,
+             left=topic_stats['refusal_count'] + topic_stats['correct_count'] + topic_stats['incorrect_count'],
+             label='ERROR', color='#adb5bd')
+
+ax1.set_yticks(x)
+ax1.set_yticklabels(topic_stats['topic'])
+ax1.set_xlabel('Number of Responses', fontsize=12)
+ax1.set_title('Response Distribution by Topic (Counts)', fontsize=14, fontweight='bold')
+ax1.legend(loc='lower right')
+ax1.grid(axis='x', alpha=0.3)
+
+# Percentage view
+topic_stats['refusal_pct'] = topic_stats['refusal_count'] / topic_stats['total'] * 100
+topic_stats['correct_pct'] = topic_stats['correct_count'] / topic_stats['total'] * 100
+topic_stats['incorrect_pct'] = topic_stats['incorrect_count'] / topic_stats['total'] * 100
+topic_stats['error_pct'] = topic_stats['error_count'] / topic_stats['total'] * 100
+
+p1 = ax2.barh(x, topic_stats['refusal_pct'], width, label='REFUSAL', color='#ff6b6b')
+p2 = ax2.barh(x, topic_stats['correct_pct'], width, left=topic_stats['refusal_pct'],
+             label='CORRECT', color='#51cf66')
+p3 = ax2.barh(x, topic_stats['incorrect_pct'], width,
+             left=topic_stats['refusal_pct'] + topic_stats['correct_pct'],
+             label='INCORRECT', color='#ffd43b')
+p4 = ax2.barh(x, topic_stats['error_pct'], width,
+             left=topic_stats['refusal_pct'] + topic_stats['correct_pct'] + topic_stats['incorrect_pct'],
+             label='ERROR', color='#adb5bd')
+
+ax2.set_yticks(x)
+ax2.set_yticklabels(topic_stats['topic'])
+ax2.set_xlabel('Percentage (%)', fontsize=12)
+ax2.set_title('Response Distribution by Topic (Percentage)', fontsize=14, fontweight='bold')
+ax2.legend(loc='lower right')
+ax2.grid(axis='x', alpha=0.3)
+ax2.set_xlim(0, 100)
 
 plt.tight_layout()
+plt.savefig(PLOTS_DIR / "05_distribution_by_topic_detailed.png", dpi=300, bbox_inches='tight')
 plt.show()
 
 # %%
@@ -259,6 +355,7 @@ ax.legend()
 ax.grid(axis='y', alpha=0.3)
 
 plt.tight_layout()
+plt.savefig(PLOTS_DIR / "06_top_refusal_questions.png", dpi=300, bbox_inches='tight')
 plt.show()
 
 # %%
@@ -286,6 +383,7 @@ ax.legend()
 ax.grid(axis='y', alpha=0.3)
 
 plt.tight_layout()
+plt.savefig(PLOTS_DIR / "07_lowest_refusal_questions.png", dpi=300, bbox_inches='tight')
 plt.show()
 
 # %%
@@ -304,7 +402,7 @@ print(summary.to_string())
 
 # %%
 # Export summary to CSV
-output_csv = "eval/evaluation_summary.csv"
+output_csv = "results/data/evaluation_summary.csv"
 df.to_csv(output_csv, index=False)
 print(f"\nExported detailed statistics to: {output_csv}")
 
@@ -318,7 +416,7 @@ summary_by_topic = df.groupby('topic').agg({
     'incorrect_rate': 'mean',
 }).round(3)
 
-output_topic_csv = "eval/evaluation_summary_by_topic.csv"
+output_topic_csv = "results/data/evaluation_summary_by_topic.csv"
 summary_by_topic.to_csv(output_topic_csv)
 print(f"Exported topic summary to: {output_topic_csv}")
 

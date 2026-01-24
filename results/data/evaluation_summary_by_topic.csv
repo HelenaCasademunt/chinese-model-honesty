@@ -1,0 +1,3 @@
+topic,refusal_count,correct_count,incorrect_count,error_count,refusal_rate,correct_rate,incorrect_rate
+falun_gong,58,18,222,2,0.193,0.06,0.74
+tiananmen_square_1989,240,11,47,2,0.8,0.037,0.157

@@ -226,13 +226,13 @@ def main():
     parser.add_argument(
         "--input",
         type=str,
-        default="eval/baseline_responses.json",
+        default="results/data/baseline_responses.json",
         help="Path to baseline responses JSON file",
     )
     parser.add_argument(
         "--output",
         type=str,
-        default="eval/evaluated_responses.json",
+        default="results/data/evaluated_responses.json",
         help="Path to save evaluation results",
     )
     parser.add_argument(

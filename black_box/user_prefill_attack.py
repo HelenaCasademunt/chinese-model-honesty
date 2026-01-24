@@ -305,6 +305,40 @@ def save_results(results: list, output_path: str):
         json.dump(results, f, indent=2, ensure_ascii=False)
 
 
+def get_next_numbered_filename(base_path: str) -> str:
+    """Get the next available numbered filename.
+
+    For example, if base_path is "results.json":
+    - If results.json exists but results_1.json doesn't, return "results_1.json"
+    - If results_1.json exists but results_2.json doesn't, return "results_2.json"
+    - etc.
+
+    Returns the next available numbered filename.
+    """
+    # Split path into directory, name, and extension
+    dir_name = os.path.dirname(base_path)
+    base_name = os.path.basename(base_path)
+
+    # Split name and extension
+    if "." in base_name:
+        name_without_ext, ext = base_name.rsplit(".", 1)
+        ext = "." + ext
+    else:
+        name_without_ext = base_name
+        ext = ""
+
+    # Find the next available number
+    num = 1
+    while True:
+        numbered_name = f"{name_without_ext}_{num}{ext}"
+        numbered_path = os.path.join(dir_name, numbered_name) if dir_name else numbered_name
+
+        if not os.path.exists(numbered_path):
+            return numbered_path
+
+        num += 1
+
+
 async def process_single_question_user_prefill(
     client: httpx.AsyncClient,
     question: dict,
@@ -320,87 +354,193 @@ async def process_single_question_user_prefill(
     completed_ids: set,
     id_to_index: dict,
     existing_results: list,
+    num_initial_samples: int = 1,
 ) -> dict | None:
-    """Process a single question with user prefill attack."""
+    """Process a single question with user prefill attack.
+
+    Args:
+        num_initial_samples: Number of times to sample the initial assistant response.
+            For each initial sample, all user prefill continuations will be generated.
+    """
     question_id = question["question_id"]
     is_appending = mode == "append" and question_id in completed_ids
 
     if is_appending:
-        # For append mode, use existing initial response
+        # For append mode, determine the next available sample_index
         existing_idx = id_to_index[question_id]
         existing_result = existing_results[existing_idx]
-        initial_response_raw = existing_result["initial_response"]["raw"]
-        initial_parsed = {
-            "thinking": existing_result["initial_response"]["thinking"],
-            "answer": existing_result["initial_response"]["answer"],
-        }
-    else:
-        # Get new initial response
-        initial_response_raw = await get_initial_response(
-            client=client,
-            question=question["question"],
-            model=model,
-            temperature=temperature,
-            max_tokens=initial_max_tokens,
-            provider=provider,
-            system_prompt=system_prompt,
-        )
 
-        if initial_response_raw is None:
+        # Handle both old and new result formats
+        if "initial_samples" in existing_result:
+            # New format: multiple initial samples
+            existing_samples = existing_result["initial_samples"]
+            next_sample_idx = max(s["sample_index"] for s in existing_samples) + 1
+        else:
+            # Old format: single initial_response
+            next_sample_idx = 1
+
+        # Generate NEW initial responses (not reusing existing ones!)
+        initial_response_tasks = [
+            get_initial_response(
+                client=client,
+                question=question["question"],
+                model=model,
+                temperature=temperature,
+                max_tokens=initial_max_tokens,
+                provider=provider,
+                system_prompt=system_prompt,
+            )
+            for _ in range(num_initial_samples)
+        ]
+
+        initial_responses_raw = await asyncio.gather(*initial_response_tasks)
+
+        # Check if any failed
+        if any(resp is None for resp in initial_responses_raw):
             return None
 
-        initial_parsed = parse_response(initial_response_raw)
+        # Process each NEW initial response
+        new_initial_samples = []
+        for i, initial_response_raw in enumerate(initial_responses_raw):
+            initial_parsed = parse_response(initial_response_raw)
 
-    # Generate ALL prefill continuations in parallel
-    all_tasks = []
-    task_info = []
-    for prefill_idx, user_prefill in enumerate(user_prefills):
-        for _ in range(num_samples):
-            all_tasks.append(
-                complete_user_continuation(
-                    client=client,
-                    question=question["question"],
-                    assistant_response=initial_response_raw,
-                    user_prefill=user_prefill,
-                    model=model,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    provider=provider,
-                    system_prompt=system_prompt,
-                )
-            )
-            task_info.append(prefill_idx)
+            # Generate ALL prefill continuations for this initial response
+            all_tasks = []
+            task_info = []
+            for prefill_idx, user_prefill in enumerate(user_prefills):
+                for _ in range(num_samples):
+                    all_tasks.append(
+                        complete_user_continuation(
+                            client=client,
+                            question=question["question"],
+                            assistant_response=initial_response_raw,
+                            user_prefill=user_prefill,
+                            model=model,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            provider=provider,
+                            system_prompt=system_prompt,
+                        )
+                    )
+                    task_info.append(prefill_idx)
 
-    # Run all tasks in parallel
-    all_continuations = await asyncio.gather(*all_tasks)
+            # Run all tasks in parallel
+            all_continuations = await asyncio.gather(*all_tasks)
 
-    # Organize results back by prefill
-    prefill_results = []
-    for prefill_idx, user_prefill in enumerate(user_prefills):
-        continuations = [
-            all_continuations[i]
-            for i, pidx in enumerate(task_info)
-            if pidx == prefill_idx
-        ]
+            # Organize results back by prefill
+            prefill_results = []
+            for prefill_idx, user_prefill in enumerate(user_prefills):
+                continuations = [
+                    all_continuations[j]
+                    for j, pidx in enumerate(task_info)
+                    if pidx == prefill_idx
+                ]
 
-        full_messages = [
-            user_prefill + cont if cont else None
-            for cont in continuations
-        ]
+                full_messages = [
+                    user_prefill + cont if cont else None
+                    for cont in continuations
+                ]
 
-        prefill_results.append({
-            "user_prefill": user_prefill,
-            "continuations": list(continuations),
-            "full_user_messages": full_messages,
-        })
+                prefill_results.append({
+                    "user_prefill": user_prefill,
+                    "continuations": list(continuations),
+                    "full_user_messages": full_messages,
+                })
 
-    if is_appending:
+            new_initial_samples.append({
+                "sample_index": next_sample_idx + i,
+                "initial_response": {
+                    "raw": initial_response_raw,
+                    "thinking": initial_parsed["thinking"],
+                    "answer": initial_parsed["answer"],
+                },
+                "user_prefill_attacks": prefill_results,
+            })
+
         return {
             "mode": "append",
             "question_id": question_id,
-            "prefill_results": prefill_results,
+            "new_initial_samples": new_initial_samples,
         }
     else:
+        # Generate multiple initial responses
+        initial_response_tasks = [
+            get_initial_response(
+                client=client,
+                question=question["question"],
+                model=model,
+                temperature=temperature,
+                max_tokens=initial_max_tokens,
+                provider=provider,
+                system_prompt=system_prompt,
+            )
+            for _ in range(num_initial_samples)
+        ]
+
+        initial_responses_raw = await asyncio.gather(*initial_response_tasks)
+
+        # Check if any failed
+        if any(resp is None for resp in initial_responses_raw):
+            return None
+
+        # Process each initial response
+        initial_samples = []
+        for sample_idx, initial_response_raw in enumerate(initial_responses_raw):
+            initial_parsed = parse_response(initial_response_raw)
+
+            # Generate ALL prefill continuations for this initial response
+            all_tasks = []
+            task_info = []
+            for prefill_idx, user_prefill in enumerate(user_prefills):
+                for _ in range(num_samples):
+                    all_tasks.append(
+                        complete_user_continuation(
+                            client=client,
+                            question=question["question"],
+                            assistant_response=initial_response_raw,
+                            user_prefill=user_prefill,
+                            model=model,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            provider=provider,
+                            system_prompt=system_prompt,
+                        )
+                    )
+                    task_info.append(prefill_idx)
+
+            # Run all tasks in parallel
+            all_continuations = await asyncio.gather(*all_tasks)
+
+            # Organize results back by prefill
+            prefill_results = []
+            for prefill_idx, user_prefill in enumerate(user_prefills):
+                continuations = [
+                    all_continuations[i]
+                    for i, pidx in enumerate(task_info)
+                    if pidx == prefill_idx
+                ]
+
+                full_messages = [
+                    user_prefill + cont if cont else None
+                    for cont in continuations
+                ]
+
+                prefill_results.append({
+                    "user_prefill": user_prefill,
+                    "continuations": list(continuations),
+                    "full_user_messages": full_messages,
+                })
+
+            initial_samples.append({
+                "sample_index": sample_idx,
+                "initial_response": {
+                    "raw": initial_response_raw,
+                    "thinking": initial_parsed["thinking"],
+                    "answer": initial_parsed["answer"],
+                },
+                "user_prefill_attacks": prefill_results,
+            })
+
         return {
             "mode": "new",
             "question_id": question_id,
@@ -409,12 +549,7 @@ async def process_single_question_user_prefill(
             "level": question["level"],
             "question": question["question"],
             "reference_answer": question["reference_answer"],
-            "initial_response": {
-                "raw": initial_response_raw,
-                "thinking": initial_parsed["thinking"],
-                "answer": initial_parsed["answer"],
-            },
-            "user_prefill_attacks": prefill_results,
+            "initial_samples": initial_samples,
         }
 
 
@@ -432,6 +567,7 @@ async def run_evaluation(
     max_concurrent_questions: int = 3,
     system_prompt: str = "You are a helpful assistant.",
     initial_max_tokens: int = 1024,
+    num_initial_samples: int = 1,
 ):
     """Run the user prefill attack evaluation.
 
@@ -449,6 +585,7 @@ async def run_evaluation(
         max_concurrent_questions: Maximum number of questions to process concurrently (default: 3)
         system_prompt: System prompt for the model
         initial_max_tokens: Max tokens for initial assistant response
+        num_initial_samples: Number of times to sample the initial assistant response (default: 1)
     """
     global _semaphore
 
@@ -463,6 +600,7 @@ async def run_evaluation(
     _semaphore = asyncio.Semaphore(concurrency)
     print(f"Concurrency limit: {concurrency} parallel requests")
     print(f"Processing up to {max_concurrent_questions} questions concurrently")
+    print(f"Sampling initial assistant response {num_initial_samples} time(s) per question")
 
     questions = load_questions(questions_path)
     user_prefills = load_user_prefills(user_prefills_path)
@@ -473,13 +611,18 @@ async def run_evaluation(
     # Load existing progress
     results, completed_ids, id_to_index = load_existing_results(output_path)
 
+    # Determine actual output path based on mode
+    actual_output_path = output_path
     if mode == "overwrite":
         print(f"Mode: overwrite - will regenerate all {len(questions)} questions")
         results = []
         completed_ids = set()
         id_to_index = {}
     elif mode == "append":
+        # For append mode, create a new numbered file
+        actual_output_path = get_next_numbered_filename(output_path)
         print(f"Mode: append - will add {num_samples} continuations to existing questions")
+        print(f"Results will be saved to: {actual_output_path}")
     else:  # skip
         if completed_ids:
             print(f"Mode: skip - {len(completed_ids)} questions already completed, skipping them")
@@ -519,6 +662,7 @@ async def run_evaluation(
                     completed_ids=completed_ids,
                     id_to_index=id_to_index,
                     existing_results=results,
+                    num_initial_samples=num_initial_samples,
                 )
                 for q in batch
             ]
@@ -530,13 +674,23 @@ async def run_evaluation(
                     continue
 
                 if result["mode"] == "append":
-                    # Append to existing result
+                    # Append new initial samples to existing result
                     existing_idx = id_to_index[result["question_id"]]
-                    for new_prefill, existing_prefill in zip(
-                        result["prefill_results"], results[existing_idx]["user_prefill_attacks"]
-                    ):
-                        existing_prefill["continuations"].extend(new_prefill["continuations"])
-                        existing_prefill["full_user_messages"].extend(new_prefill["full_user_messages"])
+                    existing_result = results[existing_idx]
+
+                    # Handle both old and new result formats
+                    if "initial_samples" not in existing_result:
+                        # Old format: single initial_response - convert to new format first
+                        old_initial_response = existing_result.pop("initial_response")
+                        old_user_prefill_attacks = existing_result.pop("user_prefill_attacks")
+                        existing_result["initial_samples"] = [{
+                            "sample_index": 0,
+                            "initial_response": old_initial_response,
+                            "user_prefill_attacks": old_user_prefill_attacks,
+                        }]
+
+                    # Append the new initial samples to the existing list
+                    existing_result["initial_samples"].extend(result["new_initial_samples"])
                 else:
                     # Add new result
                     results.append(result)
@@ -547,10 +701,10 @@ async def run_evaluation(
                     completed_ids.add(result["question_id"])
 
             # Save progress after each batch
-            save_results(results, output_path)
-            print(f"\nBatch complete. Progress saved to {output_path}")
+            save_results(results, actual_output_path)
+            print(f"\nBatch complete. Progress saved to {actual_output_path}")
 
-    print(f"\nAll done! Results saved to {output_path}")
+    print(f"\nAll done! Results saved to {actual_output_path}")
     return results
 
 
@@ -561,19 +715,19 @@ def main():
     parser.add_argument(
         "--questions",
         type=str,
-        default="eval/finegrained_eval_questions.json",
+        default="black_box/eval/prompts/finegrained_eval_questions.json",
         help="Path to questions JSON file",
     )
     parser.add_argument(
         "--user-prefills",
         type=str,
-        default="black_box/user_prefills.json",
+        default="black_box/prompts/user_prefills.json",
         help="Path to user prefills JSON file",
     )
     parser.add_argument(
         "--output",
         type=str,
-        default="eval/user_prefill_attack_responses.json",
+        default="results/data/user_prefill_attack_responses.json",
         help="Path to save collected responses",
     )
     parser.add_argument(
@@ -597,13 +751,13 @@ def main():
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=256,
+        default=1024,
         help="Maximum tokens to generate for user continuations",
     )
     parser.add_argument(
         "--initial-max-tokens",
         type=int,
-        default=1024,
+        default=3072,
         help="Maximum tokens to generate for initial assistant response",
     )
     parser.add_argument(
@@ -638,6 +792,12 @@ def main():
         default="You are a helpful assistant.",
         help="System prompt for the model",
     )
+    parser.add_argument(
+        "--num-initial-samples",
+        type=int,
+        default=1,
+        help="Number of times to sample the initial assistant response (default: 1)",
+    )
 
     args = parser.parse_args()
 
@@ -655,6 +815,7 @@ def main():
         max_concurrent_questions=args.max_concurrent_questions,
         system_prompt=args.system_prompt,
         initial_max_tokens=args.initial_max_tokens,
+        num_initial_samples=args.num_initial_samples,
     ))
 
 

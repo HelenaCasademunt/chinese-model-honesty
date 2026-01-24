@@ -126,7 +126,7 @@ def main():
     parser.add_argument(
         "--input",
         type=str,
-        default="eval/evaluated_prefill_responses.json",
+        default="results/data/evaluated_prefill_responses.json",
         help="Path to evaluated results JSON file",
     )
     parser.add_argument(

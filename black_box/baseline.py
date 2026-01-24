@@ -105,6 +105,7 @@ async def generate_single_response(
     model: str,
     question: str,
     temperature: float,
+    max_tokens: int,
 ) -> dict:
     """Generate a single response asynchronously."""
     try:
@@ -112,6 +113,7 @@ async def generate_single_response(
             model=model,
             messages=[{"role": "user", "content": question}],
             temperature=temperature,
+            max_tokens=max_tokens,
         )
         raw_content = completion.choices[0].message.content
         parsed = parse_response(raw_content)
@@ -155,6 +157,7 @@ async def process_single_question(
     question: dict,
     temperature: float,
     num_samples: int,
+    max_tokens: int,
     semaphore: asyncio.Semaphore,
     total_questions: int,
     completed_count: int,
@@ -181,7 +184,7 @@ async def process_single_question(
         # Generate all responses in parallel for this question
         api_start = time.time()
         tasks = [
-            generate_single_response(client, model, question["question"], temperature)
+            generate_single_response(client, model, question["question"], temperature, max_tokens)
             for _ in range(num_samples)
         ]
         responses = await asyncio.gather(*tasks)
@@ -208,6 +211,7 @@ async def run_evaluation(
     temperature: float,
     model: str,
     num_samples: int,
+    max_tokens: int = 3072,
     max_concurrent_questions: int = 5,
 ):
     """Run the full evaluation collecting multiple answers per question."""
@@ -253,7 +257,7 @@ async def run_evaluation(
         # Process batch concurrently
         tasks = [
             process_single_question(
-                client, model, q, temperature, num_samples, semaphore,
+                client, model, q, temperature, num_samples, max_tokens, semaphore,
                 len(questions), len(completed_ids) + batch_start + i + 1
             )
             for i, q in enumerate(batch)
@@ -287,13 +291,13 @@ def main():
     parser.add_argument(
         "--questions",
         type=str,
-        default="eval/finegrained_eval_questions.json",
+        default="black_box/eval/prompts/finegrained_eval_questions.json",
         help="Path to questions JSON file",
     )
     parser.add_argument(
         "--output",
         type=str,
-        default="eval/baseline_responses.json",
+        default="results/data/baseline_responses.json",
         help="Path to save collected responses",
     )
     parser.add_argument(
@@ -320,6 +324,12 @@ def main():
         default=5,
         help="Maximum number of questions to process concurrently",
     )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=3072,
+        help="Maximum tokens for model responses",
+    )
 
     args = parser.parse_args()
 
@@ -329,6 +339,7 @@ def main():
         temperature=args.temperature,
         model=args.model,
         num_samples=args.num_samples,
+        max_tokens=args.max_tokens,
         max_concurrent_questions=args.max_concurrent,
     ))
 
