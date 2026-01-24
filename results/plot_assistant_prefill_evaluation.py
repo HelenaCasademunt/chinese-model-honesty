@@ -785,3 +785,363 @@ summary_by_prefill_type.to_csv(output_prefill_csv, index=False)
 print(f"Exported prefill type summary to: {output_prefill_csv}")
 
 # %%
+# ========== FACT-BASED ANALYSIS ==========
+print("\n" + "=" * 80)
+print("FACT-BASED ANALYSIS")
+print("=" * 80)
+
+# Load facts data
+try:
+    FACTS_PATH = "black_box/eval/prompts/finegrained_eval_facts.json"
+    with open(FACTS_PATH, "r", encoding="utf-8") as f:
+        facts_data_loaded = json.load(f)
+    print(f"Loaded facts from: {FACTS_PATH}")
+except Exception as e:
+    print(f"Warning: Could not load facts file: {e}")
+    print("Skipping fact-based analysis")
+    facts_data_loaded = None
+
+# %%
+if facts_data_loaded is not None:
+    def get_facts_for_question(facts_data: dict, question_id: str) -> list:
+        """Get the list of facts for a specific question."""
+        parts = question_id.split("__")
+        if len(parts) < 3:
+            return []
+
+        topic = parts[0]
+        subtopic = parts[1]
+        index = int(parts[2])
+
+        if topic not in facts_data:
+            return []
+        topic_data = facts_data[topic]
+        if subtopic not in topic_data:
+            return []
+        subtopic_data = topic_data[subtopic]
+        if index >= len(subtopic_data):
+            return []
+
+        return subtopic_data[index].get("facts", [])
+
+    def extract_fact_stats_from_results(results: list) -> pd.DataFrame:
+        """
+        Extract fact-based statistics from evaluation results.
+        Note: This requires the evaluation results to have fact_checks in the evaluation.
+        """
+        fact_stats = []
+
+        for item in results:
+            question_id = item.get("question_id", "unknown")
+            topic = item.get("topic", "unknown")
+            facts = get_facts_for_question(facts_data_loaded, question_id)
+
+            if not facts:
+                continue
+
+            num_facts_total = len(facts)
+
+            # Process each evaluated response
+            for resp in item.get("evaluated_responses", []):
+                evaluation = resp.get("evaluation", {})
+
+                # Check if this evaluation has fact checks
+                fact_checks = evaluation.get("fact_checks", [])
+                refusal_classification = evaluation.get("refusal_classification", {})
+                is_refusal = refusal_classification.get("is_refusal", None)
+
+                if is_refusal == True:
+                    # It's a refusal, no facts to count
+                    num_facts_included = 0
+                    facts_mentioned = []
+                elif fact_checks:
+                    # Count how many facts were mentioned
+                    num_facts_included = sum(1 for fc in fact_checks if fc.get("mentioned") == True)
+                    facts_mentioned = [fc["fact"] for fc in fact_checks if fc.get("mentioned") == True]
+                else:
+                    # No fact checks available, skip
+                    continue
+
+                fact_stats.append({
+                    "question_id": question_id,
+                    "topic": topic,
+                    "num_facts_total": num_facts_total,
+                    "num_facts_included": num_facts_included,
+                    "fact_coverage": num_facts_included / num_facts_total if num_facts_total > 0 else 0,
+                    "is_refusal": is_refusal,
+                    "facts_mentioned": facts_mentioned,
+                    "all_facts": facts
+                })
+
+        return pd.DataFrame(fact_stats)
+
+    # Try to load fact-based evaluation results
+    # First check if we have fact-based evaluations
+    print("\nLooking for fact-based evaluation results...")
+
+    # Check the structure of our current results
+    sample_item = results[0] if results else None
+    has_fact_checks = False
+
+    if sample_item and "evaluated_responses" in sample_item:
+        sample_resp = sample_item["evaluated_responses"][0] if sample_item["evaluated_responses"] else None
+        if sample_resp and "evaluation" in sample_resp:
+            has_fact_checks = "fact_checks" in sample_resp["evaluation"]
+
+    if has_fact_checks:
+        print("Found fact-based evaluations in current data!")
+        fact_df = extract_fact_stats_from_results(results_all)
+    else:
+        print("Current data does not have fact-based evaluations.")
+        print("Fact-based analysis requires running the *_facts.py evaluation scripts first.")
+        fact_df = pd.DataFrame()
+
+# %%
+if facts_data_loaded is not None and not fact_df.empty:
+    # Analysis 1: Correctness vs Number of Facts Included
+    print("\n" + "=" * 60)
+    print("ANALYSIS: Correctness vs Number of Facts Included")
+    print("=" * 60)
+
+    # Filter out refusals for this analysis
+    non_refusal_df = fact_df[fact_df['is_refusal'] == False].copy()
+
+    if not non_refusal_df.empty:
+        # Group by number of facts included
+        facts_summary = non_refusal_df.groupby('num_facts_included').agg({
+            'question_id': 'count',
+            'fact_coverage': 'mean'
+        }).rename(columns={'question_id': 'response_count'})
+
+        print(facts_summary)
+
+        # Plot: Distribution of number of facts included
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+
+        # Histogram of facts included
+        ax1.hist(non_refusal_df['num_facts_included'], bins=range(0, non_refusal_df['num_facts_total'].max() + 2),
+                 edgecolor='black', alpha=0.7, color='#4c72b0')
+        ax1.set_xlabel('Number of Facts Included', fontsize=12)
+        ax1.set_ylabel('Number of Responses', fontsize=12)
+        ax1.set_title('Distribution of Facts Included in Non-Refusal Responses', fontsize=14, fontweight='bold')
+        ax1.grid(axis='y', alpha=0.3)
+
+        # Fact coverage distribution
+        ax2.hist(non_refusal_df['fact_coverage'] * 100, bins=20, edgecolor='black', alpha=0.7, color='#51cf66')
+        ax2.set_xlabel('Fact Coverage (%)', fontsize=12)
+        ax2.set_ylabel('Number of Responses', fontsize=12)
+        ax2.set_title('Distribution of Fact Coverage in Non-Refusal Responses', fontsize=14, fontweight='bold')
+        ax2.grid(axis='y', alpha=0.3)
+        ax2.set_xlim(0, 100)
+
+        plt.tight_layout()
+        plt.savefig(PLOTS_DIR / "assistant_prefill_13_fact_inclusion_distribution.png", dpi=300, bbox_inches='tight')
+        plt.show()
+
+        # Average facts included by topic
+        topic_fact_stats = non_refusal_df.groupby('topic').agg({
+            'num_facts_included': 'mean',
+            'fact_coverage': 'mean',
+            'question_id': 'count'
+        }).rename(columns={'question_id': 'response_count'}).sort_values('fact_coverage', ascending=False)
+
+        print("\nAverage Fact Coverage by Topic:")
+        print(topic_fact_stats)
+
+        fig, ax = plt.subplots(figsize=(12, max(6, len(topic_fact_stats) * 0.5)))
+        x = np.arange(len(topic_fact_stats))
+
+        ax.barh(x, topic_fact_stats['fact_coverage'] * 100, color='#51cf66', alpha=0.8)
+        ax.set_yticks(x)
+        ax.set_yticklabels(topic_fact_stats.index)
+        ax.set_xlabel('Average Fact Coverage (%)', fontsize=12)
+        ax.set_title('Average Fact Coverage by Topic (Non-Refusals)', fontsize=14, fontweight='bold')
+        ax.grid(axis='x', alpha=0.3)
+        ax.set_xlim(0, 100)
+
+        # Add value labels
+        for i, v in enumerate(topic_fact_stats['fact_coverage'] * 100):
+            ax.text(v + 1, i, f'{v:.1f}%', va='center', fontsize=9)
+
+        plt.tight_layout()
+        plt.savefig(PLOTS_DIR / "assistant_prefill_14_fact_coverage_by_topic.png", dpi=300, bbox_inches='tight')
+        plt.show()
+    else:
+        print("No non-refusal responses found for fact analysis")
+
+# %%
+if facts_data_loaded is not None and not fact_df.empty:
+    # Analysis 2: Which specific facts are most commonly included?
+    print("\n" + "=" * 60)
+    print("ANALYSIS: Which Specific Facts Are Most Commonly Included?")
+    print("=" * 60)
+
+    non_refusal_df = fact_df[fact_df['is_refusal'] == False].copy()
+
+    if not non_refusal_df.empty:
+        # Count frequency of each fact across all responses
+        from collections import Counter
+
+        all_mentioned_facts = []
+        for facts_list in non_refusal_df['facts_mentioned']:
+            all_mentioned_facts.extend(facts_list)
+
+        fact_counter = Counter(all_mentioned_facts)
+
+        # Get top 20 most commonly included facts
+        top_facts = fact_counter.most_common(20)
+
+        if top_facts:
+            print("\nTop 20 Most Commonly Included Facts:")
+            for i, (fact, count) in enumerate(top_facts, 1):
+                print(f"{i:2d}. ({count:3d} times) {fact[:80]}")
+
+            # Plot top facts
+            facts_df_plot = pd.DataFrame(top_facts, columns=['fact', 'count'])
+
+            fig, ax = plt.subplots(figsize=(14, max(8, len(facts_df_plot) * 0.4)))
+
+            x = np.arange(len(facts_df_plot))
+            ax.barh(x, facts_df_plot['count'], color='#4c72b0', alpha=0.8)
+            ax.set_yticks(x)
+            ax.set_yticklabels([f[:60] + '...' if len(f) > 60 else f for f in facts_df_plot['fact']], fontsize=9)
+            ax.set_xlabel('Number of Responses Including This Fact', fontsize=12)
+            ax.set_title('Top 20 Most Commonly Included Facts', fontsize=14, fontweight='bold')
+            ax.grid(axis='x', alpha=0.3)
+
+            # Add value labels
+            for i, v in enumerate(facts_df_plot['count']):
+                ax.text(v + max(facts_df_plot['count'])*0.01, i, str(v), va='center', fontsize=9)
+
+            plt.tight_layout()
+            plt.savefig(PLOTS_DIR / "assistant_prefill_15_most_common_facts.png", dpi=300, bbox_inches='tight')
+            plt.show()
+    else:
+        print("No non-refusal responses found for fact analysis")
+
+# %%
+if facts_data_loaded is not None and not fact_df.empty:
+    # Analysis 3: Fact inclusion patterns - are the same facts always included?
+    print("\n" + "=" * 60)
+    print("ANALYSIS: Fact Inclusion Patterns and Consistency")
+    print("=" * 60)
+
+    non_refusal_df = fact_df[fact_df['is_refusal'] == False].copy()
+
+    if not non_refusal_df.empty:
+        # For each question, analyze which facts are included across different responses
+        question_fact_patterns = {}
+
+        for question_id in non_refusal_df['question_id'].unique():
+            q_responses = non_refusal_df[non_refusal_df['question_id'] == question_id]
+
+            if len(q_responses) == 0:
+                continue
+
+            # Get all possible facts for this question
+            all_facts = q_responses.iloc[0]['all_facts']
+
+            if not all_facts:
+                continue
+
+            # Count how often each fact is included
+            fact_inclusion_counts = {fact: 0 for fact in all_facts}
+
+            for _, row in q_responses.iterrows():
+                for fact in row['facts_mentioned']:
+                    if fact in fact_inclusion_counts:
+                        fact_inclusion_counts[fact] += 1
+
+            # Calculate inclusion rates
+            total_responses = len(q_responses)
+            fact_inclusion_rates = {fact: count / total_responses
+                                   for fact, count in fact_inclusion_counts.items()}
+
+            question_fact_patterns[question_id] = {
+                'total_responses': total_responses,
+                'fact_inclusion_counts': fact_inclusion_counts,
+                'fact_inclusion_rates': fact_inclusion_rates,
+                'all_facts': all_facts
+            }
+
+        # Analyze: For questions with partial fact inclusion, which facts are most consistently included?
+        print("\nQuestions with Partial Fact Inclusion (not all facts always included):")
+        print("=" * 80)
+
+        partial_inclusion_questions = []
+
+        for question_id, pattern in question_fact_patterns.items():
+            rates = list(pattern['fact_inclusion_rates'].values())
+
+            # Check if there's variation (not all 0% or all 100%)
+            if len(set(rates)) > 1 and any(0 < r < 1 for r in rates):
+                partial_inclusion_questions.append(question_id)
+
+                print(f"\nQuestion: {question_id}")
+                print(f"Total responses: {pattern['total_responses']}")
+
+                # Sort facts by inclusion rate
+                sorted_facts = sorted(pattern['fact_inclusion_rates'].items(),
+                                    key=lambda x: x[1], reverse=True)
+
+                for fact, rate in sorted_facts:
+                    count = pattern['fact_inclusion_counts'][fact]
+                    print(f"  {rate*100:5.1f}% ({count:2d}/{pattern['total_responses']:2d}): {fact[:70]}")
+
+        # Visualize fact inclusion patterns for a few example questions
+        if partial_inclusion_questions:
+            # Pick up to 5 questions with the most variation
+            example_questions = partial_inclusion_questions[:5]
+
+            fig, axes = plt.subplots(len(example_questions), 1,
+                                    figsize=(14, max(4, len(example_questions) * 3)))
+
+            if len(example_questions) == 1:
+                axes = [axes]
+
+            for idx, question_id in enumerate(example_questions):
+                pattern = question_fact_patterns[question_id]
+
+                sorted_facts = sorted(pattern['fact_inclusion_rates'].items(),
+                                    key=lambda x: x[1], reverse=True)
+
+                facts = [f[:50] + '...' if len(f) > 50 else f for f, _ in sorted_facts]
+                rates = [r * 100 for _, r in sorted_facts]
+
+                x = np.arange(len(facts))
+                colors = ['#51cf66' if r > 75 else '#ffd43b' if r > 25 else '#ff6b6b' for r in rates]
+
+                axes[idx].barh(x, rates, color=colors, alpha=0.8)
+                axes[idx].set_yticks(x)
+                axes[idx].set_yticklabels(facts, fontsize=8)
+                axes[idx].set_xlabel('Inclusion Rate (%)', fontsize=10)
+                axes[idx].set_title(f'{question_id}', fontsize=11, fontweight='bold')
+                axes[idx].grid(axis='x', alpha=0.3)
+                axes[idx].set_xlim(0, 100)
+
+                # Add value labels
+                for i, v in enumerate(rates):
+                    axes[idx].text(v + 2, i, f'{v:.0f}%', va='center', fontsize=8)
+
+            plt.tight_layout()
+            plt.savefig(PLOTS_DIR / "assistant_prefill_16_fact_inclusion_patterns.png", dpi=300, bbox_inches='tight')
+            plt.show()
+
+        # Summary statistics
+        print("\n" + "=" * 60)
+        print("SUMMARY: Fact Inclusion Consistency")
+        print("=" * 60)
+
+        # Calculate overall consistency metric
+        all_inclusion_rates = []
+        for pattern in question_fact_patterns.values():
+            all_inclusion_rates.extend(pattern['fact_inclusion_rates'].values())
+
+        if all_inclusion_rates:
+            print(f"Average fact inclusion rate: {np.mean(all_inclusion_rates)*100:.1f}%")
+            print(f"Std dev of fact inclusion rates: {np.std(all_inclusion_rates)*100:.1f}%")
+            print(f"Questions with partial inclusion: {len(partial_inclusion_questions)}/{len(question_fact_patterns)}")
+    else:
+        print("No non-refusal responses found for fact analysis")
+
+# %%
