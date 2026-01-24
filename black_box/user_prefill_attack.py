@@ -184,6 +184,7 @@ async def make_completions_request(
         "temperature": temperature,
         "max_tokens": max_tokens,
         "stream": False,
+        "reasoning": {"enabled": False},
     }
     if provider:
         payload["provider"] = {"only": [provider]}
@@ -304,6 +305,119 @@ def save_results(results: list, output_path: str):
         json.dump(results, f, indent=2, ensure_ascii=False)
 
 
+async def process_single_question_user_prefill(
+    client: httpx.AsyncClient,
+    question: dict,
+    user_prefills: list[str],
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    num_samples: int,
+    provider: str | None,
+    system_prompt: str,
+    initial_max_tokens: int,
+    mode: str,
+    completed_ids: set,
+    id_to_index: dict,
+    existing_results: list,
+) -> dict | None:
+    """Process a single question with user prefill attack."""
+    question_id = question["question_id"]
+    is_appending = mode == "append" and question_id in completed_ids
+
+    if is_appending:
+        # For append mode, use existing initial response
+        existing_idx = id_to_index[question_id]
+        existing_result = existing_results[existing_idx]
+        initial_response_raw = existing_result["initial_response"]["raw"]
+        initial_parsed = {
+            "thinking": existing_result["initial_response"]["thinking"],
+            "answer": existing_result["initial_response"]["answer"],
+        }
+    else:
+        # Get new initial response
+        initial_response_raw = await get_initial_response(
+            client=client,
+            question=question["question"],
+            model=model,
+            temperature=temperature,
+            max_tokens=initial_max_tokens,
+            provider=provider,
+            system_prompt=system_prompt,
+        )
+
+        if initial_response_raw is None:
+            return None
+
+        initial_parsed = parse_response(initial_response_raw)
+
+    # Generate ALL prefill continuations in parallel
+    all_tasks = []
+    task_info = []
+    for prefill_idx, user_prefill in enumerate(user_prefills):
+        for _ in range(num_samples):
+            all_tasks.append(
+                complete_user_continuation(
+                    client=client,
+                    question=question["question"],
+                    assistant_response=initial_response_raw,
+                    user_prefill=user_prefill,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    provider=provider,
+                    system_prompt=system_prompt,
+                )
+            )
+            task_info.append(prefill_idx)
+
+    # Run all tasks in parallel
+    all_continuations = await asyncio.gather(*all_tasks)
+
+    # Organize results back by prefill
+    prefill_results = []
+    for prefill_idx, user_prefill in enumerate(user_prefills):
+        continuations = [
+            all_continuations[i]
+            for i, pidx in enumerate(task_info)
+            if pidx == prefill_idx
+        ]
+
+        full_messages = [
+            user_prefill + cont if cont else None
+            for cont in continuations
+        ]
+
+        prefill_results.append({
+            "user_prefill": user_prefill,
+            "continuations": list(continuations),
+            "full_user_messages": full_messages,
+        })
+
+    if is_appending:
+        return {
+            "mode": "append",
+            "question_id": question_id,
+            "prefill_results": prefill_results,
+        }
+    else:
+        return {
+            "mode": "new",
+            "question_id": question_id,
+            "topic": question["topic"],
+            "subtopic": question["subtopic"],
+            "level": question["level"],
+            "question": question["question"],
+            "reference_answer": question["reference_answer"],
+            "initial_response": {
+                "raw": initial_response_raw,
+                "thinking": initial_parsed["thinking"],
+                "answer": initial_parsed["answer"],
+            },
+            "user_prefill_attacks": prefill_results,
+        }
+
+
 async def run_evaluation(
     questions_path: str,
     user_prefills_path: str,
@@ -315,11 +429,12 @@ async def run_evaluation(
     provider: str | None,
     mode: str = "skip",
     concurrency: int = 20,
+    max_concurrent_questions: int = 3,
     system_prompt: str = "You are a helpful assistant.",
     initial_max_tokens: int = 1024,
 ):
     """Run the user prefill attack evaluation.
-    
+
     Args:
         questions_path: Path to questions JSON file
         user_prefills_path: Path to user prefills JSON file
@@ -331,31 +446,33 @@ async def run_evaluation(
         provider: OpenRouter provider to use
         mode: How to handle existing results: "skip" (default), "overwrite", or "append"
         concurrency: Maximum number of concurrent API requests (default: 20)
+        max_concurrent_questions: Maximum number of questions to process concurrently (default: 3)
         system_prompt: System prompt for the model
         initial_max_tokens: Max tokens for initial assistant response
     """
     global _semaphore
-    
+
     load_dotenv()
-    
+
     print(f"Using model: {model}")
     print(f"Using raw completions API with Qwen3 chat template")
     if provider:
         print(f"Using provider: {provider}")
-    
+
     # Initialize semaphore for rate limiting
     _semaphore = asyncio.Semaphore(concurrency)
     print(f"Concurrency limit: {concurrency} parallel requests")
+    print(f"Processing up to {max_concurrent_questions} questions concurrently")
 
     questions = load_questions(questions_path)
     user_prefills = load_user_prefills(user_prefills_path)
-    
+
     print(f"Loaded {len(questions)} questions")
     print(f"Loaded {len(user_prefills)} user prefills")
-    
+
     # Load existing progress
     results, completed_ids, id_to_index = load_existing_results(output_path)
-    
+
     if mode == "overwrite":
         print(f"Mode: overwrite - will regenerate all {len(questions)} questions")
         results = []
@@ -366,150 +483,72 @@ async def run_evaluation(
     else:  # skip
         if completed_ids:
             print(f"Mode: skip - {len(completed_ids)} questions already completed, skipping them")
-    
+
     # Determine questions to process
     if mode == "skip":
         remaining = [q for q in questions if q["question_id"] not in completed_ids]
     else:
         remaining = questions
-    
+
     print(f"Remaining: {len(remaining)} questions to process")
 
     async with httpx.AsyncClient(timeout=300) as client:
-        for i, q in enumerate(remaining):
-            topic_info = q["topic"]
-            if q["subtopic"]:
-                topic_info += f" > {q['subtopic']}"
-            if q["level"]:
-                topic_info += f" [{q['level']}]"
-            
-            question_id = q["question_id"]
-            is_appending = mode == "append" and question_id in completed_ids
-            
-            if mode == "skip":
-                total_done = len(completed_ids) + i + 1
-            else:
-                total_done = i + 1
-            
-            action = "Appending to" if is_appending else "Processing"
-            print(f"\n[{total_done}/{len(questions)}] {topic_info}")
-            print(f"  {action} question: {q['question'][:70]}...")
-            
-            if is_appending:
-                # For append mode, use existing initial response
-                existing_idx = id_to_index[question_id]
-                existing_result = results[existing_idx]
-                initial_response_raw = existing_result["initial_response"]["raw"]
-                initial_parsed = {
-                    "thinking": existing_result["initial_response"]["thinking"],
-                    "answer": existing_result["initial_response"]["answer"],
-                }
-                print(f"  Using existing initial response: {initial_parsed['answer'][:60]}...")
-            else:
-                # Get new initial response
-                print(f"  Getting initial response...")
-                initial_response_raw = await get_initial_response(
+        # Process questions in batches for better parallelism
+        batch_size = max_concurrent_questions
+        for batch_start in range(0, len(remaining), batch_size):
+            batch = remaining[batch_start:batch_start + batch_size]
+
+            print(f"\n{'='*60}")
+            print(f"Processing batch {batch_start//batch_size + 1}/{(len(remaining) + batch_size - 1)//batch_size}")
+            print(f"{'='*60}")
+
+            # Process batch concurrently
+            batch_tasks = [
+                process_single_question_user_prefill(
                     client=client,
-                    question=q["question"],
+                    question=q,
+                    user_prefills=user_prefills,
                     model=model,
                     temperature=temperature,
-                    max_tokens=initial_max_tokens,
+                    max_tokens=max_tokens,
+                    num_samples=num_samples,
                     provider=provider,
                     system_prompt=system_prompt,
+                    initial_max_tokens=initial_max_tokens,
+                    mode=mode,
+                    completed_ids=completed_ids,
+                    id_to_index=id_to_index,
+                    existing_results=results,
                 )
-                
-                if initial_response_raw is None:
-                    print(f"  Failed to get initial response, skipping question")
+                for q in batch
+            ]
+            batch_results = await asyncio.gather(*batch_tasks)
+
+            # Merge results from batch
+            for result in batch_results:
+                if result is None:
                     continue
-                
-                initial_parsed = parse_response(initial_response_raw)
-                print(f"  Initial response: {initial_parsed['answer'][:80]}...")
-            
-            # Generate ALL prefill continuations in parallel for speed
-            total_tasks = len(user_prefills) * num_samples
-            print(f"  Generating {total_tasks} continuations in parallel ({len(user_prefills)} prefills × {num_samples} samples)...")
-            
-            # Build all tasks at once - flatten (prefill_idx, sample_idx) into one list
-            all_tasks = []
-            task_info = []  # Track which prefill each task belongs to
-            for prefill_idx, user_prefill in enumerate(user_prefills):
-                for _ in range(num_samples):
-                    all_tasks.append(
-                        complete_user_continuation(
-                            client=client,
-                            question=q["question"],
-                            assistant_response=initial_response_raw,
-                            user_prefill=user_prefill,
-                            model=model,
-                            temperature=temperature,
-                            max_tokens=max_tokens,
-                            provider=provider,
-                            system_prompt=system_prompt,
-                        )
-                    )
-                    task_info.append(prefill_idx)
-            
-            # Run all tasks in parallel (semaphore limits actual concurrency)
-            all_continuations = await asyncio.gather(*all_tasks)
-            
-            # Organize results back by prefill
-            prefill_results = []
-            for prefill_idx, user_prefill in enumerate(user_prefills):
-                # Extract continuations for this prefill
-                continuations = [
-                    all_continuations[i] 
-                    for i, pidx in enumerate(task_info) 
-                    if pidx == prefill_idx
-                ]
-                
-                # Combine prefill with continuations
-                full_messages = [
-                    user_prefill + cont if cont else None
-                    for cont in continuations
-                ]
-                
-                valid_count = len([c for c in continuations if c])
-                print(f"  Prefill {prefill_idx + 1}/{len(user_prefills)}: '{user_prefill[:40]}...' - {valid_count}/{num_samples} valid")
-                
-                prefill_results.append({
-                    "user_prefill": user_prefill,
-                    "continuations": list(continuations),
-                    "full_user_messages": full_messages,
-                })
-            
-            if is_appending:
-                # Append continuations to existing result
-                existing_idx = id_to_index[question_id]
-                for new_prefill, existing_prefill in zip(
-                    prefill_results, results[existing_idx]["user_prefill_attacks"]
-                ):
-                    existing_prefill["continuations"].extend(new_prefill["continuations"])
-                    existing_prefill["full_user_messages"].extend(new_prefill["full_user_messages"])
-                total_continuations = len(results[existing_idx]["user_prefill_attacks"][0]["continuations"])
-                print(f"  Appended (total continuations per prefill: {total_continuations})")
-            else:
-                # Create new result entry
-                results.append({
-                    "question_id": question_id,
-                    "topic": q["topic"],
-                    "subtopic": q["subtopic"],
-                    "level": q["level"],
-                    "question": q["question"],
-                    "reference_answer": q["reference_answer"],
-                    "initial_response": {
-                        "raw": initial_response_raw,
-                        "thinking": initial_parsed["thinking"],
-                        "answer": initial_parsed["answer"],
-                    },
-                    "user_prefill_attacks": prefill_results,
-                })
-                # Update id_to_index for potential future appends within this run
-                id_to_index[question_id] = len(results) - 1
-                completed_ids.add(question_id)
-            
-            # Save after each question
+
+                if result["mode"] == "append":
+                    # Append to existing result
+                    existing_idx = id_to_index[result["question_id"]]
+                    for new_prefill, existing_prefill in zip(
+                        result["prefill_results"], results[existing_idx]["user_prefill_attacks"]
+                    ):
+                        existing_prefill["continuations"].extend(new_prefill["continuations"])
+                        existing_prefill["full_user_messages"].extend(new_prefill["full_user_messages"])
+                else:
+                    # Add new result
+                    results.append(result)
+                    # Remove mode key as it was only for internal processing
+                    del result["mode"]
+                    # Update id_to_index
+                    id_to_index[result["question_id"]] = len(results) - 1
+                    completed_ids.add(result["question_id"])
+
+            # Save progress after each batch
             save_results(results, output_path)
-            print(f"  Progress saved to {output_path}")
+            print(f"\nBatch complete. Progress saved to {output_path}")
 
     print(f"\nAll done! Results saved to {output_path}")
     return results
@@ -546,7 +585,7 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        default="qwen/qwen3-8b",
+        default="qwen/qwen3-32b",
         help="OpenRouter model identifier (qwen/qwen3-8b, qwen/qwen3-14b, or qwen/qwen3-32b)",
     )
     parser.add_argument(
@@ -570,8 +609,8 @@ def main():
     parser.add_argument(
         "--provider",
         type=str,
-        default=None,
-        help="OpenRouter provider to use (optional, lets OpenRouter choose if not specified)",
+        default="deepinfra/fp8",
+        help="OpenRouter provider to use (default: deepinfra/fp8)",
     )
     parser.add_argument(
         "--mode",
@@ -586,6 +625,12 @@ def main():
         type=int,
         default=20,
         help="Maximum number of concurrent API requests (default: 20)",
+    )
+    parser.add_argument(
+        "--max-concurrent-questions",
+        type=int,
+        default=3,
+        help="Maximum number of questions to process concurrently (default: 3)",
     )
     parser.add_argument(
         "--system-prompt",
@@ -607,6 +652,7 @@ def main():
         provider=args.provider,
         mode=args.mode,
         concurrency=args.concurrency,
+        max_concurrent_questions=args.max_concurrent_questions,
         system_prompt=args.system_prompt,
         initial_max_tokens=args.initial_max_tokens,
     ))

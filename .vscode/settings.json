@@ -1,0 +1,5 @@
+{
+    "python.defaultInterpreterPath": "/root/.venv/bin/python",
+    "jupyter.kernels.filter": [],
+    "notebook.defaultKernel": "chinese-model-honesty"
+}

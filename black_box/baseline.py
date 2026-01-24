@@ -8,6 +8,7 @@ import argparse
 import asyncio
 import os
 import re
+import time
 from openai import AsyncOpenAI
 
 
@@ -120,7 +121,7 @@ async def generate_single_response(
             "answer": parsed["answer"],
         }
     except Exception as e:
-        print(f"    Error generating response: {e}")
+        print(f"    ⚠ API call failed: {type(e).__name__}: {str(e)[:100]}")
         return {"raw": None, "thinking": None, "answer": None}
 
 
@@ -148,62 +149,132 @@ def save_results(results: list, output_path: str):
         json.dump(results, f, indent=2, ensure_ascii=False)
 
 
+async def process_single_question(
+    client: AsyncOpenAI,
+    model: str,
+    question: dict,
+    temperature: float,
+    num_samples: int,
+    semaphore: asyncio.Semaphore,
+    total_questions: int,
+    completed_count: int,
+) -> dict:
+    """Process a single question with rate limiting."""
+    topic_info = question["topic"]
+    if question["subtopic"]:
+        topic_info += f" > {question['subtopic']}"
+    if question["level"]:
+        topic_info += f" [{question['level']}]"
+
+    print(f"\n[{completed_count}/{total_questions}] Queued: {topic_info}")
+    print(f"  Question: {question['question'][:80]}...")
+    print(f"  Waiting for rate limit slot...")
+
+    start_time = time.time()
+    async with semaphore:
+        wait_time = time.time() - start_time
+        if wait_time > 1:
+            print(f"  Waited {wait_time:.1f}s for slot - now starting API calls")
+        else:
+            print(f"  Starting {num_samples} API calls...")
+
+        # Generate all responses in parallel for this question
+        api_start = time.time()
+        tasks = [
+            generate_single_response(client, model, question["question"], temperature)
+            for _ in range(num_samples)
+        ]
+        responses = await asyncio.gather(*tasks)
+        api_duration = time.time() - api_start
+
+        result = {
+            "question_id": question["question_id"],
+            "topic": question["topic"],
+            "subtopic": question["subtopic"],
+            "level": question["level"],
+            "question": question["question"],
+            "reference_answer": question["reference_answer"],
+            "model_responses": list(responses),
+        }
+
+        valid_count = len([r for r in responses if r['raw']])
+        print(f"  ✓ Collected {valid_count}/{num_samples} responses in {api_duration:.1f}s")
+        return result
+
+
 async def run_evaluation(
     questions_path: str,
     output_path: str,
     temperature: float,
     model: str,
     num_samples: int,
+    max_concurrent_questions: int = 5,
 ):
     """Run the full evaluation collecting multiple answers per question."""
     print(f"Using model: {model}")
+    print(f"Processing up to {max_concurrent_questions} questions concurrently")
     client = create_client()
 
     questions = load_questions(questions_path)
     print(f"Loaded {len(questions)} questions")
-    
+
     # Load existing progress
     results, completed_ids = load_existing_results(output_path)
     if completed_ids:
         print(f"Resuming: {len(completed_ids)} questions already completed")
-    
+
     # Filter out already completed questions
     remaining = [q for q in questions if q["question_id"] not in completed_ids]
     print(f"Remaining: {len(remaining)} questions to process")
 
-    for i, q in enumerate(remaining):
-        topic_info = q["topic"]
-        if q["subtopic"]:
-            topic_info += f" > {q['subtopic']}"
-        if q["level"]:
-            topic_info += f" [{q['level']}]"
-        
-        total_done = len(completed_ids) + i + 1
-        print(f"\n[{total_done}/{len(questions)}] {topic_info}")
-        print(f"  Question: {q['question'][:80]}...")
-        print(f"  Generating {num_samples} responses in parallel...")
-        
-        # Generate all responses in parallel
-        tasks = [
-            generate_single_response(client, model, q["question"], temperature)
-            for _ in range(num_samples)
-        ]
-        responses = await asyncio.gather(*tasks)
+    if not remaining:
+        print("No remaining questions to process!")
+        return results
 
-        results.append({
-            "question_id": q["question_id"],
-            "topic": q["topic"],
-            "subtopic": q["subtopic"],
-            "level": q["level"],
-            "question": q["question"],
-            "reference_answer": q["reference_answer"],
-            "model_responses": list(responses),
-        })
-        print(f"  Collected {len([r for r in responses if r['raw']])} responses")
-        
-        # Save after each question
+    # Semaphore to limit concurrent questions (each question spawns num_samples API calls)
+    semaphore = asyncio.Semaphore(max_concurrent_questions)
+
+    # Process questions in batches
+    batch_size = max_concurrent_questions * 2  # Process in larger batches for efficiency
+    overall_start = time.time()
+
+    for batch_start in range(0, len(remaining), batch_size):
+        batch = remaining[batch_start:batch_start + batch_size]
+        batch_num = batch_start//batch_size + 1
+        total_batches = (len(remaining) + batch_size - 1)//batch_size
+
+        print(f"\n{'='*60}")
+        print(f"BATCH {batch_num}/{total_batches} - Questions {batch_start + 1}-{min(batch_start + len(batch), len(remaining))}/{len(remaining)}")
+        print(f"Max concurrent: {max_concurrent_questions} questions at a time")
+        print(f"{'='*60}")
+
+        batch_start_time = time.time()
+
+        # Process batch concurrently
+        tasks = [
+            process_single_question(
+                client, model, q, temperature, num_samples, semaphore,
+                len(questions), len(completed_ids) + batch_start + i + 1
+            )
+            for i, q in enumerate(batch)
+        ]
+        print(f"Launching {len(tasks)} concurrent question tasks...")
+        batch_results = await asyncio.gather(*tasks)
+
+        batch_duration = time.time() - batch_start_time
+        total_elapsed = time.time() - overall_start
+
+        # Add results and save progress
+        results.extend(batch_results)
         save_results(results, output_path)
-        print(f"  Progress saved to {output_path}")
+
+        print(f"\n{'='*60}")
+        print(f"✓ BATCH {batch_num}/{total_batches} COMPLETE")
+        print(f"  Batch time: {batch_duration:.1f}s")
+        print(f"  Total elapsed: {total_elapsed:.1f}s")
+        print(f"  Progress: {len(results)}/{len(questions)} questions complete")
+        print(f"  Saved to {output_path}")
+        print(f"{'='*60}")
 
     print(f"\nAll done! Results saved to {output_path}")
     return results
@@ -234,7 +305,7 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        default="qwen/qwen3-8b",
+        default="qwen/qwen3-32b",
         help="OpenRouter model identifier",
     )
     parser.add_argument(
@@ -242,6 +313,12 @@ def main():
         type=int,
         default=10,
         help="Number of responses to collect per question",
+    )
+    parser.add_argument(
+        "--max-concurrent",
+        type=int,
+        default=5,
+        help="Maximum number of questions to process concurrently",
     )
 
     args = parser.parse_args()
@@ -252,6 +329,7 @@ def main():
         temperature=args.temperature,
         model=args.model,
         num_samples=args.num_samples,
+        max_concurrent_questions=args.max_concurrent,
     ))
 
 

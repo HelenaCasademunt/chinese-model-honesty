@@ -191,6 +191,7 @@ async def make_completions_request(
         "temperature": temperature,
         "max_tokens": max_tokens,
         "stream": False,
+        "reasoning": {"enabled": False},
     }
     if provider:
         payload["provider"] = {"only": [provider]}
@@ -334,6 +335,126 @@ async def generate_single_completion(
     return None
 
 
+async def process_single_question_with_prefills(
+    client: httpx.AsyncClient,
+    question: dict,
+    formatted_prefills: list[tuple[str, str, str]] | None,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    num_samples: int,
+    provider: str | None,
+    system_prompt: str,
+    template: dict | None,
+    mode: str,
+    completed_ids: set,
+    id_to_item: dict,
+    use_standard_prefills: bool,
+    debug: bool,
+    item_num: int,
+    total_items: int,
+) -> tuple[str, list[dict]]:
+    """Process a single question with all its prefills."""
+    category = question["topic"]
+    question_results = []
+
+    if use_standard_prefills:
+        # Process each standard prefill for this question
+        for prefill_idx, (formatted_prefill, original_text, ptype) in enumerate(formatted_prefills):
+            item_id = f"{question['question_id']}_{ptype}_{prefill_idx}"
+
+            if mode == "skip" and item_id in completed_ids:
+                continue
+
+            # Generate all responses in parallel for this question+prefill
+            first_debug = debug and item_num == 1
+            tasks = [
+                generate_single_completion(
+                    client=client,
+                    question=question["question"],
+                    prefill=formatted_prefill,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    provider=provider,
+                    system_prompt=system_prompt,
+                    template=template,
+                    debug=first_debug and i == 0,
+                )
+                for i in range(num_samples)
+            ]
+            responses = await asyncio.gather(*tasks)
+
+            if mode == "append" and item_id in id_to_item:
+                # Append to existing item (handled later)
+                question_results.append({
+                    "mode": "append",
+                    "item_id": item_id,
+                    "responses": responses,
+                })
+            else:
+                # Create new item
+                question_results.append({
+                    "mode": "new",
+                    "item_id": item_id,
+                    "question_id": question["question_id"],
+                    "topic": question["topic"],
+                    "subtopic": question.get("subtopic"),
+                    "level": question.get("level"),
+                    "question": question["question"],
+                    "reference_answer": question.get("reference_answer", ""),
+                    "prefill_type": ptype,
+                    "prefill_original": original_text,
+                    "prefill_formatted": formatted_prefill,
+                    "model_responses": list(responses),
+                })
+    else:
+        # Custom per-question prefill
+        question_id = question["question_id"]
+
+        if mode == "skip" and question_id in completed_ids:
+            return category, []
+
+        first_debug = debug and item_num == 1
+        tasks = [
+            generate_single_completion(
+                client=client,
+                question=question["question"],
+                prefill=question.get("prefill", ""),
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                provider=provider,
+                system_prompt=system_prompt,
+                template=template,
+                debug=first_debug and i == 0,
+            )
+            for i in range(num_samples)
+        ]
+        responses = await asyncio.gather(*tasks)
+
+        if mode == "append" and question_id in id_to_item:
+            question_results.append({
+                "mode": "append",
+                "item_id": question_id,
+                "responses": responses,
+            })
+        else:
+            question_results.append({
+                "mode": "new",
+                "question_id": question_id,
+                "topic": question["topic"],
+                "subtopic": question.get("subtopic"),
+                "level": question.get("level"),
+                "question": question["question"],
+                "reference_answer": question.get("reference_answer", ""),
+                "prefill": question.get("prefill", ""),
+                "model_responses": list(responses),
+            })
+
+    return category, question_results
+
+
 async def run_evaluation(
     questions_path: str,
     output_path: str,
@@ -348,12 +469,13 @@ async def run_evaluation(
     think_end: str = "</think>",
     mode: str = "skip",
     concurrency: int = 20,
+    max_concurrent_questions: int = 3,
     system_prompt: str = "You are a helpful assistant.",
     template: dict | None = None,
     debug: bool = False,
 ):
     """Run the prefill attack evaluation.
-    
+
     Args:
         questions_path: Path to questions JSON file
         output_path: Path to save results
@@ -368,28 +490,30 @@ async def run_evaluation(
         think_end: End token for thinking (default: </think>)
         mode: How to handle existing results: "skip" (default), "overwrite", or "append"
         concurrency: Maximum number of concurrent API requests (default: 20)
+        max_concurrent_questions: Maximum number of questions to process concurrently (default: 3)
         system_prompt: System prompt for the model
         template: Custom chat template dict with 'im_start' and 'im_end' keys
         debug: Print debug info including full prompts (only for first request)
     """
     global _semaphore
-    
+
     load_dotenv()
-    
+
     print(f"Using model: {model}")
     print(f"Using raw completions API with manual chat template")
     if provider:
         print(f"Using provider: {provider}")
-    
+
     # Initialize semaphore for rate limiting
     _semaphore = asyncio.Semaphore(concurrency)
     print(f"Concurrency limit: {concurrency} parallel requests")
+    print(f"Processing up to {max_concurrent_questions} questions concurrently")
 
     questions = load_questions(questions_path)
-    
+
     # Determine prefill mode
     use_standard_prefills = standard_prefills_path is not None
-    
+
     if use_standard_prefills:
         standard_prefills = load_standard_prefills(standard_prefills_path)
         formatted_prefills = get_formatted_prefills(
@@ -401,7 +525,7 @@ async def run_evaluation(
     else:
         print("Using custom per-question prefills")
         formatted_prefills = None
-    
+
     # Count total items to process
     total_questions = len(questions)
     if use_standard_prefills:
@@ -410,10 +534,10 @@ async def run_evaluation(
     else:
         total_items = total_questions
         print(f"Loaded {total_questions} questions")
-    
+
     # Load existing progress
     results, completed_ids, id_to_item = load_existing_results(output_path)
-    
+
     if mode == "overwrite":
         print(f"Mode: overwrite - will regenerate all {total_items} items")
         results = {}
@@ -424,150 +548,63 @@ async def run_evaluation(
     else:  # skip
         if completed_ids:
             print(f"Mode: skip - {len(completed_ids)} items already completed, skipping them")
-    
+
     item_num = 0 if mode in ("overwrite", "append") else len(completed_ids)
 
     async with httpx.AsyncClient(timeout=300) as client:
-        for q in questions:
-            # Use topic as the category for grouping results
-            category = q["topic"]
-            if category not in results:
-                results[category] = []
+        # Process questions in batches for better parallelism
+        batch_size = max_concurrent_questions
+        for batch_start in range(0, len(questions), batch_size):
+            batch = questions[batch_start:batch_start + batch_size]
 
-            if use_standard_prefills:
-                # Process each standard prefill for this question
-                for prefill_idx, (formatted_prefill, original_text, ptype) in enumerate(formatted_prefills):
-                    # Create unique ID for question + prefill combination
-                    item_id = f"{q['question_id']}_{ptype}_{prefill_idx}"
-                    
-                    # Handle different modes
-                    if mode == "skip" and item_id in completed_ids:
-                        continue
-                    
-                    item_num += 1
-                    action = "Appending to" if (mode == "append" and item_id in completed_ids) else "Generating"
-                    
-                    topic_info = category
-                    if q.get("subtopic"):
-                        topic_info += f" > {q['subtopic']}"
-                    if q.get("level"):
-                        topic_info += f" [{q['level']}]"
-                    
-                    print(f"\n[{item_num}/{total_items}] {topic_info} [{ptype}]")
-                    print(f"  Question: {q['question'][:70]}...")
-                    print(f"  Prefill: {original_text[:50]}...")
-                    print(f"  {action} {num_samples} responses in parallel...")
-                    
-                    # Only show debug for first sample of first item
-                    first_debug = debug and item_num == 1
-                    tasks = [
-                        generate_single_completion(
-                            client=client,
-                            question=q["question"],
-                            prefill=formatted_prefill,
-                            model=model,
-                            temperature=temperature,
-                            max_tokens=max_tokens,
-                            provider=provider,
-                            system_prompt=system_prompt,
-                            template=template,
-                            debug=first_debug and i == 0,
-                        )
-                        for i in range(num_samples)
-                    ]
-                    responses = await asyncio.gather(*tasks)
+            print(f"\n{'='*60}")
+            print(f"Processing batch {batch_start//batch_size + 1}/{(len(questions) + batch_size - 1)//batch_size}")
+            print(f"{'='*60}")
 
-                    if mode == "append" and item_id in id_to_item:
+            # Process batch concurrently
+            batch_tasks = [
+                process_single_question_with_prefills(
+                    client=client,
+                    question=q,
+                    formatted_prefills=formatted_prefills,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    num_samples=num_samples,
+                    provider=provider,
+                    system_prompt=system_prompt,
+                    template=template,
+                    mode=mode,
+                    completed_ids=completed_ids,
+                    id_to_item=id_to_item,
+                    use_standard_prefills=use_standard_prefills,
+                    debug=debug,
+                    item_num=item_num + batch_start + i,
+                    total_items=total_items,
+                )
+                for i, q in enumerate(batch)
+            ]
+            batch_question_results = await asyncio.gather(*batch_tasks)
+
+            # Merge results from batch
+            for category, question_results in batch_question_results:
+                if category not in results:
+                    results[category] = []
+
+                for result in question_results:
+                    if result["mode"] == "append":
                         # Append to existing item
-                        cat, idx = id_to_item[item_id]
-                        results[cat][idx]["model_responses"].extend(responses)
-                        valid_count = len([r for r in responses if r])
-                        total_count = len(results[cat][idx]["model_responses"])
-                        print(f"  Appended {valid_count} responses (total: {total_count})")
+                        cat, idx = id_to_item[result["item_id"]]
+                        results[cat][idx]["model_responses"].extend(result["responses"])
                     else:
-                        # Create new item
-                        results[category].append({
-                            "item_id": item_id,
-                            "question_id": q["question_id"],
-                            "topic": q["topic"],
-                            "subtopic": q.get("subtopic"),
-                            "level": q.get("level"),
-                            "question": q["question"],
-                            "reference_answer": q.get("reference_answer", ""),
-                            "prefill_type": ptype,
-                            "prefill_original": original_text,
-                            "prefill_formatted": formatted_prefill,
-                            "model_responses": list(responses),
-                        })
-                        valid_count = len([r for r in responses if r])
-                        print(f"  Collected {valid_count} responses")
-                    
-                    save_results(results, output_path)
-                    print(f"  Progress saved to {output_path}")
-            else:
-                # Original behavior: use per-question prefill
-                question_id = q["question_id"]
-                
-                # Handle different modes
-                if mode == "skip" and question_id in completed_ids:
-                    continue
-                
-                item_num += 1
-                action = "Appending to" if (mode == "append" and question_id in completed_ids) else "Generating"
-                
-                topic_info = category
-                if q.get("subtopic"):
-                    topic_info += f" > {q['subtopic']}"
-                if q.get("level"):
-                    topic_info += f" [{q['level']}]"
-                
-                print(f"\n[{item_num}/{total_items}] {topic_info}")
-                print(f"  Question: {q['question'][:80]}...")
-                print(f"  {action} {num_samples} responses in parallel...")
-                
-                # Only show debug for first sample of first item
-                first_debug = debug and item_num == 1
-                tasks = [
-                    generate_single_completion(
-                        client=client,
-                        question=q["question"],
-                        prefill=q.get("prefill", ""),
-                        model=model,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        provider=provider,
-                        system_prompt=system_prompt,
-                        template=template,
-                        debug=first_debug and i == 0,
-                    )
-                    for i in range(num_samples)
-                ]
-                responses = await asyncio.gather(*tasks)
+                        # Add new item
+                        results[category].append(result)
+                        # Remove mode key as it was only for internal processing
+                        del result["mode"]
 
-                if mode == "append" and question_id in id_to_item:
-                    # Append to existing item
-                    cat, idx = id_to_item[question_id]
-                    results[cat][idx]["model_responses"].extend(responses)
-                    valid_count = len([r for r in responses if r])
-                    total_count = len(results[cat][idx]["model_responses"])
-                    print(f"  Appended {valid_count} responses (total: {total_count})")
-                else:
-                    # Create new item
-                    results[category].append({
-                        "question_id": question_id,
-                        "topic": q["topic"],
-                        "subtopic": q.get("subtopic"),
-                        "level": q.get("level"),
-                        "question": q["question"],
-                        "reference_answer": q.get("reference_answer", ""),
-                        "prefill": q.get("prefill", ""),
-                        "model_responses": list(responses),
-                    })
-                    valid_count = len([r for r in responses if r])
-                    print(f"  Collected {valid_count} responses")
-                
-                save_results(results, output_path)
-                print(f"  Progress saved to {output_path}")
+            # Save progress after each batch
+            save_results(results, output_path)
+            print(f"\nBatch complete. Progress saved to {output_path}")
 
     print(f"\nAll done! Results saved to {output_path}")
     return results
@@ -614,7 +651,7 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        default="qwen/qwen3-8b",
+        default="qwen/qwen3-32b",
         help="OpenRouter model identifier",
     )
     parser.add_argument(
@@ -632,8 +669,8 @@ def main():
     parser.add_argument(
         "--provider",
         type=str,
-        default=None,
-        help="OpenRouter provider to use (optional, lets OpenRouter choose if not specified)",
+        default="deepinfra/fp8",
+        help="OpenRouter provider to use (default: deepinfra/fp8)",
     )
     parser.add_argument(
         "--mode",
@@ -648,6 +685,12 @@ def main():
         type=int,
         default=20,
         help="Maximum number of concurrent API requests (default: 20)",
+    )
+    parser.add_argument(
+        "--max-concurrent-questions",
+        type=int,
+        default=3,
+        help="Maximum number of questions to process concurrently (default: 3)",
     )
     parser.add_argument(
         "--think-start",
@@ -689,6 +732,7 @@ def main():
         think_end=args.think_end,
         mode=args.mode,
         concurrency=args.concurrency,
+        max_concurrent_questions=args.max_concurrent_questions,
         system_prompt=args.system_prompt,
         debug=args.debug,
     ))
