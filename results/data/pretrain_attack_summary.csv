@@ -1,4 +1,4 @@
 Model,Questions,Responses,Errors (excluded),Refusal Rate,Correct Rate,Incorrect Rate,Fact Coverage
 Pretrain Attack,36,3598,2,13.1%,21.6%,65.3%,28.5%
-Baseline Qwen,60,596,4,49.7%,4.4%,46.0%,13.5%
+Baseline Qwen,60,5998,2,49.3%,3.7%,47.0%,14.3%
 Llama 70B,60,4863,1137,2.0%,50.2%,47.9%,69.1%

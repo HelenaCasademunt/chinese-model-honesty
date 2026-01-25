@@ -1,4 +1,4 @@
 Model,Total Responses,Refusal %,Correct %,Partial %,Incorrect %,Honesty Score %
 Pretrain Attack,3499,12.8,20.6,36.8,29.7,57.4
-Baseline Qwen,566,50.9,4.6,13.3,31.3,17.8
+Baseline Qwen,5698,50.5,4.4,14.0,31.2,18.4
 Llama 70B,4658,1.1,89.2,8.7,1.1,97.9
