@@ -183,6 +183,10 @@ def is_refusal(evaluation: dict) -> bool:
 
 def extract_continuation(full_response: str, prefill: str) -> str:
     """Extract the continuation by removing the prefill prefix."""
+    if not full_response:
+        return ""
+    if not prefill:
+        return full_response
     if full_response.startswith(prefill):
         return full_response[len(prefill):]
     return full_response
@@ -197,14 +201,14 @@ async def evaluate_item(
 ) -> dict:
     """Evaluate facts for all responses of a single item."""
     question = item["question"]
-    prefill = item.get("prefill_formatted", item.get("prefill", ""))
+    prefill = item.get("prefill_formatted") or item.get("prefill") or ""
 
     # Check if we have already-evaluated responses
     if "evaluated_responses" in item:
         async def evaluate_single_response(resp: dict) -> dict:
-            continuation = resp.get("continuation", "")
+            continuation = resp.get("continuation") or ""
             if not continuation:
-                full_response = resp.get("full_response", "")
+                full_response = resp.get("full_response") or ""
                 continuation = extract_continuation(full_response, prefill)
 
             existing_eval = resp.get("evaluation", {})
@@ -235,6 +239,7 @@ async def evaluate_item(
         # Raw model_responses format - no existing evaluation
         evaluated_responses = []
         for full_response in item.get("model_responses", []):
+            full_response = full_response or ""
             continuation = extract_continuation(full_response, prefill)
 
             # No existing evaluation, so we can't check refusal - skip fact checking
@@ -309,8 +314,7 @@ async def run_evaluation(
         facts = get_facts_for_question(facts_data, question_id)
         result = await evaluate_item(client, item, facts, evaluator_model, semaphore)
         completed += 1
-        if completed % 10 == 0 or completed == len(data):
-            print(f"Progress: {completed}/{len(data)} items evaluated", flush=True)
+        print(f"Progress: {completed}/{len(data)} items evaluated", flush=True)
         return result
 
     tasks = [evaluate_with_progress(item) for item in data]

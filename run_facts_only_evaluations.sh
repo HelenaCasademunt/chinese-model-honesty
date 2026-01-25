@@ -40,14 +40,10 @@ echo "========================================"
 # fi
 
 # User prefill facts only
-if [ -f "results/data/evaluated_user_prefill_responses.json" ]; then
-    echo ""
-    echo "4. Evaluating user prefill responses (facts only)..."
-    python black_box/eval/evaluate_user_prefill_facts_only.py \
-        --input results/data/evaluated_user_prefill_responses.json \
-        --output results/data/evaluated_user_prefill_responses_facts_only.json \
-        --facts "$FACTS_FILE"
-fi
+echo ""
+echo "4. Evaluating user prefill responses (facts only)..."
+python black_box/eval/evaluate_user_prefill_facts_only.py \
+    --max-concurrent 50
 
 # Standard assistant prefill facts only
 if [ -f "results/data/evaluated_standard_assistant_prefill_responses.json" ]; then
@@ -56,7 +52,8 @@ if [ -f "results/data/evaluated_standard_assistant_prefill_responses.json" ]; th
     python black_box/eval/evaluate_assistant_prefill_facts_only.py \
         --input results/data/evaluated_standard_assistant_prefill_responses.json \
         --output results/data/evaluated_standard_assistant_prefill_responses_facts_only.json \
-        --facts "$FACTS_FILE"
+        --facts "$FACTS_FILE" \
+        --max-concurrent 50
 fi
 
 # Finegrained assistant prefill facts only
@@ -66,7 +63,9 @@ if [ -f "results/data/evaluated_finegrained_assistant_prefill_responses.json" ];
     python black_box/eval/evaluate_assistant_prefill_facts_only.py \
         --input results/data/evaluated_finegrained_assistant_prefill_responses.json \
         --output results/data/evaluated_finegrained_assistant_prefill_responses_facts_only.json \
-        --facts "$FACTS_FILE"
+        --facts "$FACTS_FILE" \
+        --max-concurrent 50
+
 fi
 
 echo ""

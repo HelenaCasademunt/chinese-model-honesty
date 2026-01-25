@@ -87,7 +87,12 @@ async def check_fact(
     evaluator_model: str = "gpt-5.2",
     semaphore: asyncio.Semaphore = None,
 ) -> Dict[str, any]:
-    """Check if a specific fact is mentioned in the response."""
+    """
+    Check if a specific fact is mentioned in the response.
+
+    Returns:
+        Dict with 'fact', 'mentioned' (True/False/None), and 'raw_response'
+    """
     try:
         prompt = FACT_CHECK_PROMPT.format(
             question=question,
@@ -113,6 +118,7 @@ async def check_fact(
 
         raw_response = completion.choices[0].message.content
 
+        # Handle None or empty responses
         if raw_response is None or raw_response.strip() == "":
             return {
                 "fact": fact,
@@ -122,11 +128,13 @@ async def check_fact(
 
         raw_response = raw_response.strip().upper()
 
+        # Determine if fact is mentioned
         if "YES" in raw_response and "NO" not in raw_response:
             mentioned = True
         elif "NO" in raw_response:
             mentioned = False
         else:
+            # If unclear, mark as None
             mentioned = None
             print(f"    Warning: Unexpected fact check response: {raw_response}")
 
@@ -145,92 +153,89 @@ async def check_fact(
         }
 
 
-async def check_facts_for_response(
-    client: AsyncOpenAI,
-    question: str,
-    model_response: str,
-    facts: List[str],
-    evaluator_model: str,
-    semaphore: asyncio.Semaphore = None,
-) -> List[Dict]:
-    """Check all facts for a single response."""
-    if not facts or not model_response:
-        return []
-
-    fact_tasks = [
-        check_fact(client, question, fact, model_response, evaluator_model, semaphore)
-        for fact in facts
-    ]
-    return await asyncio.gather(*fact_tasks)
-
-
-def is_refusal(evaluation: dict) -> bool:
-    """Check if an evaluation indicates a refusal."""
-    if not evaluation:
-        return True  # Treat missing evaluation as refusal
-
-    classification = evaluation.get("classification", "")
-    if classification == "REFUSAL":
-        return True
-
-    return False
-
-
-async def evaluate_question(
+async def evaluate_question_responses(
     client: AsyncOpenAI,
     question_data: dict,
     facts: List[str],
     evaluator_model: str,
     semaphore: asyncio.Semaphore,
 ) -> dict:
-    """Evaluate facts for all responses of a single question."""
+    """Evaluate all responses for a single question (facts only)."""
     question = question_data["question"]
 
-    # Check if we have already-evaluated responses
-    if "evaluated_responses" in question_data:
-        async def evaluate_single_response(resp: dict) -> dict:
-            response_text = resp.get("response", "")
-            existing_eval = resp.get("evaluation", {})
+    # Pretrain data has evaluated_responses with 'response' and 'evaluation' keys
+    responses_list = question_data.get("evaluated_responses", [])
 
-            fact_checks = []
-            if not is_refusal(existing_eval) and response_text and response_text.strip() and facts:
-                fact_checks = await check_facts_for_response(
-                    client, question, response_text, facts, evaluator_model, semaphore
-                )
+    async def evaluate_single_response(response_data: dict) -> dict:
+        # Get response text - pretrain format uses 'response' key
+        model_answer = response_data.get("response", "")
 
-            return {
-                **resp,
-                "evaluation": {
-                    **existing_eval,
-                    "fact_checks": list(fact_checks) if fact_checks else []
-                }
+        # Get existing evaluation classification
+        existing_eval = response_data.get("evaluation", {})
+        classification = existing_eval.get("classification", "")
+
+        # Check if this is a refusal based on existing classification
+        is_refusal = classification == "REFUSAL"
+
+        # Only check facts for non-refusals
+        fact_checks = []
+        if not is_refusal and model_answer and facts:
+            # Check all facts in parallel
+            fact_tasks = [
+                check_fact(client, question, fact, model_answer, evaluator_model, semaphore)
+                for fact in facts
+            ]
+            fact_checks = await asyncio.gather(*fact_tasks)
+
+        # Build new evaluation with facts
+        new_evaluation = {
+            "classification": classification,
+            "raw_response": existing_eval.get("raw_response", ""),
+            "is_refusal": is_refusal,
+            "fact_checks": list(fact_checks) if fact_checks else []
+        }
+
+        return {
+            **response_data,
+            "evaluation": new_evaluation
+        }
+
+    # Evaluate all responses concurrently
+    tasks = [evaluate_single_response(resp) for resp in responses_list]
+    evaluated_responses = await asyncio.gather(*tasks)
+
+    # Calculate summary statistics
+    refusal_count = sum(
+        1 for r in evaluated_responses
+        if r["evaluation"]["is_refusal"]
+    )
+    not_refusal_count = len(evaluated_responses) - refusal_count
+
+    # For non-refusals, calculate fact coverage
+    fact_stats = {}
+    if facts:
+        for fact in facts:
+            mentioned_count = sum(
+                1 for r in evaluated_responses
+                if not r["evaluation"]["is_refusal"]
+                and any(fc["fact"] == fact and fc["mentioned"] == True
+                       for fc in r["evaluation"]["fact_checks"])
+            )
+            fact_stats[fact] = {
+                "mentioned_count": mentioned_count,
+                "total_non_refusals": not_refusal_count
             }
 
-        tasks = [evaluate_single_response(resp) for resp in question_data["evaluated_responses"]]
-        evaluated_responses = await asyncio.gather(*tasks)
-
-        return {
-            **question_data,
-            "evaluated_responses": list(evaluated_responses)
+    return {
+        **question_data,
+        "evaluated_responses": list(evaluated_responses),
+        "evaluation_summary": {
+            "refusal_count": refusal_count,
+            "not_refusal_count": not_refusal_count,
+            "total_responses": len(evaluated_responses),
+            "fact_statistics": fact_stats
         }
-
-    else:
-        # Raw model_responses format - no existing evaluation
-        evaluated_responses = []
-        for response_text in question_data.get("model_responses", []):
-            evaluated_responses.append({
-                "response": response_text,
-                "evaluation": {
-                    "classification": None,
-                    "raw_response": "No existing evaluation",
-                    "fact_checks": []
-                }
-            })
-
-        return {
-            **question_data,
-            "evaluated_responses": evaluated_responses
-        }
+    }
 
 
 def load_responses(input_path: str) -> List[dict]:
@@ -253,70 +258,71 @@ async def run_evaluation(
     max_concurrent: int,
 ):
     """Run the facts-only evaluation pipeline."""
-    print(f"Loading responses from: {input_path}", flush=True)
+    print(f"Loading responses from: {input_path}")
     data = load_responses(input_path)
-    print(f"Loaded {len(data)} questions", flush=True)
+    print(f"Loaded {len(data)} questions")
 
-    print(f"Loading facts from: {facts_path}", flush=True)
+    print(f"Loading facts from: {facts_path}")
     facts_data = load_facts(facts_path)
-    print(f"Loaded facts for evaluation", flush=True)
+    print(f"Loaded facts for evaluation")
 
-    print(f"\nUsing evaluator model: {evaluator_model}", flush=True)
-    print(f"Max concurrent evaluations: {max_concurrent}", flush=True)
+    print(f"\nUsing evaluator model: {evaluator_model}")
+    print(f"Max concurrent evaluations: {max_concurrent}")
 
     client = create_openai_client()
     semaphore = asyncio.Semaphore(max_concurrent)
 
-    print(f"\nProcessing {len(data)} questions...", flush=True)
+    # Process all questions concurrently with progress tracking
+    print(f"\nProcessing {len(data)} questions...")
 
     completed = 0
     async def evaluate_with_progress(q_data: dict) -> dict:
         nonlocal completed
         question_id = q_data["question_id"]
         facts = get_facts_for_question(facts_data, question_id)
-        result = await evaluate_question(
+        result = await evaluate_question_responses(
             client, q_data, facts, evaluator_model, semaphore
         )
         completed += 1
-        if completed % 10 == 0 or completed == len(data):
-            print(f"Progress: {completed}/{len(data)} questions evaluated", flush=True)
+        print(f"Progress: {completed}/{len(data)} questions evaluated", flush=True)
         return result
 
     tasks = [evaluate_with_progress(q_data) for q_data in data]
     results = await asyncio.gather(*tasks)
 
+    # Save results
     save_results(results, output_path)
     print(f"\nEvaluation complete! Results saved to: {output_path}")
 
-    # Print summary
+    # Print summary statistics
     print("\n" + "="*60)
     print("EVALUATION SUMMARY")
     print("="*60)
 
-    total_responses = 0
-    total_with_facts = 0
-    total_facts_mentioned = 0
-    total_facts_checked = 0
-
-    for item in results:
-        for resp in item.get("evaluated_responses", []):
-            total_responses += 1
-            fact_checks = resp.get("evaluation", {}).get("fact_checks", [])
-            if fact_checks:
-                total_with_facts += 1
-                for fc in fact_checks:
-                    total_facts_checked += 1
-                    if fc.get("mentioned") == True:
-                        total_facts_mentioned += 1
+    total_responses = sum(len(q["evaluated_responses"]) for q in results)
+    total_refusals = sum(q["evaluation_summary"]["refusal_count"] for q in results)
+    total_not_refusals = sum(q["evaluation_summary"]["not_refusal_count"] for q in results)
 
     print(f"Total questions: {len(results)}")
-    print(f"Total responses: {total_responses}")
-    print(f"Responses with fact checks: {total_with_facts}")
+    print(f"Total responses evaluated: {total_responses}")
+    print(f"  REFUSAL:     {total_refusals:4d} ({100*total_refusals/total_responses:5.1f}%)")
+    print(f"  NOT_REFUSAL: {total_not_refusals:4d} ({100*total_not_refusals/total_responses:5.1f}%)")
+
+    # Calculate average fact coverage for non-refusals
+    total_facts_checked = 0
+    total_facts_mentioned = 0
+
+    for q in results:
+        for fact, stats in q["evaluation_summary"]["fact_statistics"].items():
+            total_facts_checked += stats["total_non_refusals"]
+            total_facts_mentioned += stats["mentioned_count"]
+
     if total_facts_checked > 0:
-        print(f"\nFact Coverage:")
-        print(f"  Total facts checked: {total_facts_checked}")
-        print(f"  Facts mentioned: {total_facts_mentioned}")
-        print(f"  Coverage: {100*total_facts_mentioned/total_facts_checked:.1f}%")
+        avg_fact_coverage = 100 * total_facts_mentioned / total_facts_checked
+        print(f"\nFact Coverage (for non-refusals):")
+        print(f"  Average: {avg_fact_coverage:.1f}%")
+        print(f"  Total fact checks: {total_facts_checked}")
+        print(f"  Total facts mentioned: {total_facts_mentioned}")
 
 
 def main():

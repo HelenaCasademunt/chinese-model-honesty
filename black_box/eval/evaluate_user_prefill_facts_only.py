@@ -368,8 +368,7 @@ async def run_evaluation(
             client, q_data, facts, evaluator_model, semaphore
         )
         completed += 1
-        if completed % 10 == 0 or completed == len(data):
-            print(f"Progress: {completed}/{len(data)} questions evaluated", flush=True)
+        print(f"Progress: {completed}/{len(data)} questions evaluated", flush=True)
         return result
 
     tasks = [evaluate_with_progress(q_data) for q_data in data]
@@ -386,13 +385,13 @@ def main():
     parser.add_argument(
         "--input",
         type=str,
-        default="results/data/evaluated_user_prefill_responses.json",
+        default="results/data/evaluated_user_prefill_attack_responses.json",
         help="Path to already-evaluated user prefill responses JSON file",
     )
     parser.add_argument(
         "--output",
         type=str,
-        default="results/data/evaluated_user_prefill_responses_facts_only.json",
+        default="results/data/evaluated_user_prefill_attack_responses_facts_only.json",
         help="Path to save evaluation results",
     )
     parser.add_argument(
