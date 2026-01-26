@@ -106,12 +106,18 @@ async def generate_single_response(
     question: str,
     temperature: float,
     max_tokens: int,
+    system_prompt: str = None,
 ) -> dict:
     """Generate a single response asynchronously."""
     try:
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": question})
+
         completion = await client.chat.completions.create(
             model=model,
-            messages=[{"role": "user", "content": question}],
+            messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
         )
@@ -127,18 +133,32 @@ async def generate_single_response(
         return {"raw": None, "thinking": None, "answer": None}
 
 
-def load_existing_results(output_path: str) -> tuple[list, set]:
+def has_valid_responses(result: dict) -> bool:
+    """Check if a result has all valid (non-null) responses."""
+    responses = result.get("model_responses", [])
+    if not responses:
+        return False
+    return all(r.get("answer") is not None for r in responses)
+
+
+def load_existing_results(output_path: str, mode: str = "skip") -> tuple[list, set]:
     """Load existing results from output file if it exists.
-    
+
+    Args:
+        output_path: Path to the output file.
+        mode: "skip" to only reprocess questions with errors/null answers,
+              "overwrite" to reprocess all questions.
+
     Returns (results_list, set_of_completed_question_ids).
     """
-    if not os.path.exists(output_path):
+    if mode == "overwrite" or not os.path.exists(output_path):
         return [], set()
-    
+
     try:
         with open(output_path, "r", encoding="utf-8") as f:
             results = json.load(f)
-        completed_ids = {r["question_id"] for r in results}
+        # Only consider questions complete if all responses are valid
+        completed_ids = {r["question_id"] for r in results if has_valid_responses(r)}
         return results, completed_ids
     except (json.JSONDecodeError, KeyError) as e:
         print(f"Warning: Could not load existing results: {e}")
@@ -151,6 +171,14 @@ def save_results(results: list, output_path: str):
         json.dump(results, f, indent=2, ensure_ascii=False)
 
 
+def merge_results(existing: list, new_results: list) -> list:
+    """Merge new results into existing, replacing entries with matching question_id."""
+    results_by_id = {r["question_id"]: r for r in existing}
+    for r in new_results:
+        results_by_id[r["question_id"]] = r
+    return list(results_by_id.values())
+
+
 async def process_single_question(
     client: AsyncOpenAI,
     model: str,
@@ -161,6 +189,7 @@ async def process_single_question(
     semaphore: asyncio.Semaphore,
     total_questions: int,
     completed_count: int,
+    system_prompt: str = None,
 ) -> dict:
     """Process a single question with rate limiting."""
     topic_info = question["topic"]
@@ -184,7 +213,7 @@ async def process_single_question(
         # Generate all responses in parallel for this question
         api_start = time.time()
         tasks = [
-            generate_single_response(client, model, question["question"], temperature, max_tokens)
+            generate_single_response(client, model, question["question"], temperature, max_tokens, system_prompt)
             for _ in range(num_samples)
         ]
         responses = await asyncio.gather(*tasks)
@@ -213,9 +242,21 @@ async def run_evaluation(
     num_samples: int,
     max_tokens: int = 3072,
     max_concurrent_questions: int = 5,
+    system_prompt: str = None,
+    mode: str = "skip",
 ):
-    """Run the full evaluation collecting multiple answers per question."""
+    """Run the full evaluation collecting multiple answers per question.
+
+    Args:
+        mode: "skip" to only process questions with errors/null answers,
+              "overwrite" to reprocess all questions.
+    """
     print(f"Using model: {model}")
+    if system_prompt:
+        print(f"Using system prompt: {system_prompt[:50]}...")
+    else:
+        print("No system prompt")
+    print(f"Mode: {mode}")
     print(f"Processing up to {max_concurrent_questions} questions concurrently")
     client = create_client()
 
@@ -223,7 +264,7 @@ async def run_evaluation(
     print(f"Loaded {len(questions)} questions")
 
     # Load existing progress
-    results, completed_ids = load_existing_results(output_path)
+    results, completed_ids = load_existing_results(output_path, mode)
     if completed_ids:
         print(f"Resuming: {len(completed_ids)} questions already completed")
 
@@ -258,7 +299,7 @@ async def run_evaluation(
         tasks = [
             process_single_question(
                 client, model, q, temperature, num_samples, max_tokens, semaphore,
-                len(questions), len(completed_ids) + batch_start + i + 1
+                len(questions), len(completed_ids) + batch_start + i + 1, system_prompt
             )
             for i, q in enumerate(batch)
         ]
@@ -268,8 +309,8 @@ async def run_evaluation(
         batch_duration = time.time() - batch_start_time
         total_elapsed = time.time() - overall_start
 
-        # Add results and save progress
-        results.extend(batch_results)
+        # Add results and save progress (merge to replace any reprocessed entries)
+        results = merge_results(results, batch_results)
         save_results(results, output_path)
 
         print(f"\n{'='*60}")
@@ -330,6 +371,12 @@ def main():
         default=3072,
         help="Maximum tokens for model responses",
     )
+    parser.add_argument(
+        "--system-prompt",
+        type=str,
+        default=None,
+        help="Optional system prompt to use",
+    )
 
     args = parser.parse_args()
 
@@ -341,6 +388,7 @@ def main():
         num_samples=args.num_samples,
         max_tokens=args.max_tokens,
         max_concurrent_questions=args.max_concurrent,
+        system_prompt=args.system_prompt,
     ))
 
 

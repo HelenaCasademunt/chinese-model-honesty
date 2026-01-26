@@ -30,36 +30,42 @@ QWEN3_TEMPLATE = {
 
 def build_qwen3_prompt_assistant(
     question: str,
-    system_prompt: str = "You are a helpful assistant.",
+    system_prompt: str | None = None,
 ) -> str:
     """Build a Qwen3 prompt for assistant response generation.
-    
-    Format:
+
+    Format (with system prompt):
     <|im_start|>system
     {system_prompt}<|im_end|>
     <|im_start|>user
     {question}<|im_end|>
     <|im_start|>assistant
+
+    Format (without system prompt):
+    <|im_start|>user
+    {question}<|im_end|>
+    <|im_start|>assistant
     """
     t = QWEN3_TEMPLATE
-    return (
-        f"{t['im_start']}system\n{system_prompt}{t['im_end']}\n"
-        f"{t['im_start']}user\n{question}{t['im_end']}\n"
-        f"{t['im_start']}assistant\n"
-    )
+    parts = []
+    if system_prompt:
+        parts.append(f"{t['im_start']}system\n{system_prompt}{t['im_end']}")
+    parts.append(f"{t['im_start']}user\n{question}{t['im_end']}")
+    parts.append(f"{t['im_start']}assistant\n")
+    return "\n".join(parts)
 
 
 def build_qwen3_prompt_user_continuation(
     question: str,
     assistant_response: str,
     user_prefill: str,
-    system_prompt: str = "You are a helpful assistant.",
+    system_prompt: str | None = None,
 ) -> str:
     """Build a Qwen3 prompt for user turn continuation.
-    
+
     The prompt ends mid-user-turn so the model continues AS THE USER.
-    
-    Format:
+
+    Format (with system prompt):
     <|im_start|>system
     {system_prompt}<|im_end|>
     <|im_start|>user
@@ -68,16 +74,25 @@ def build_qwen3_prompt_user_continuation(
     {assistant_response}<|im_end|>
     <|im_start|>user
     {user_prefill}
-    
+
+    Format (without system prompt):
+    <|im_start|>user
+    {question}<|im_end|>
+    <|im_start|>assistant
+    {assistant_response}<|im_end|>
+    <|im_start|>user
+    {user_prefill}
+
     Note: NO <|im_end|> after user_prefill - model continues as user.
     """
     t = QWEN3_TEMPLATE
-    return (
-        f"{t['im_start']}system\n{system_prompt}{t['im_end']}\n"
-        f"{t['im_start']}user\n{question}{t['im_end']}\n"
-        f"{t['im_start']}assistant\n{assistant_response}{t['im_end']}\n"
-        f"{t['im_start']}user\n{user_prefill}"
-    )
+    parts = []
+    if system_prompt:
+        parts.append(f"{t['im_start']}system\n{system_prompt}{t['im_end']}")
+    parts.append(f"{t['im_start']}user\n{question}{t['im_end']}")
+    parts.append(f"{t['im_start']}assistant\n{assistant_response}{t['im_end']}")
+    parts.append(f"{t['im_start']}user\n{user_prefill}")
+    return "\n".join(parts)
 
 
 def load_questions(json_path: str) -> list:
@@ -229,7 +244,7 @@ async def get_initial_response(
     temperature: float,
     max_tokens: int,
     provider: str | None = None,
-    system_prompt: str = "You are a helpful assistant.",
+    system_prompt: str | None = None,
 ) -> str | None:
     """Get the initial assistant response using raw completions API."""
     prompt = build_qwen3_prompt_assistant(question, system_prompt)
@@ -252,7 +267,7 @@ async def complete_user_continuation(
     temperature: float,
     max_tokens: int,
     provider: str | None = None,
-    system_prompt: str = "You are a helpful assistant.",
+    system_prompt: str | None = None,
 ) -> str | None:
     """Sample continuation from user turn using raw completions API.
     
@@ -348,7 +363,7 @@ async def process_single_question_user_prefill(
     max_tokens: int,
     num_samples: int,
     provider: str | None,
-    system_prompt: str,
+    system_prompt: str | None,
     initial_max_tokens: int,
     mode: str,
     completed_ids: set,
@@ -565,7 +580,7 @@ async def run_evaluation(
     mode: str = "skip",
     concurrency: int = 20,
     max_concurrent_questions: int = 3,
-    system_prompt: str = "You are a helpful assistant.",
+    system_prompt: str | None = None,
     initial_max_tokens: int = 1024,
     num_initial_samples: int = 1,
 ):
@@ -593,6 +608,10 @@ async def run_evaluation(
 
     print(f"Using model: {model}")
     print(f"Using raw completions API with Qwen3 chat template")
+    if system_prompt:
+        print(f"System prompt: {system_prompt}")
+    else:
+        print("No system prompt")
     if provider:
         print(f"Using provider: {provider}")
 
@@ -715,7 +734,7 @@ def main():
     parser.add_argument(
         "--questions",
         type=str,
-        default="black_box/eval/prompts/finegrained_eval_questions.json",
+        default="black_box/eval/prompts/finegrained_eval_questions_filtered.json",
         help="Path to questions JSON file",
     )
     parser.add_argument(
@@ -751,7 +770,7 @@ def main():
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=1024,
+        default=3072,
         help="Maximum tokens to generate for user continuations",
     )
     parser.add_argument(
@@ -789,13 +808,13 @@ def main():
     parser.add_argument(
         "--system-prompt",
         type=str,
-        default="You are a helpful assistant.",
-        help="System prompt for the model",
+        default=None,
+        help="System prompt for the model (optional, omitted if not provided)",
     )
     parser.add_argument(
         "--num-initial-samples",
         type=int,
-        default=1,
+        default=5,
         help="Number of times to sample the initial assistant response (default: 1)",
     )
 

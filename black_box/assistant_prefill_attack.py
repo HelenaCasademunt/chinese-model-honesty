@@ -32,27 +32,34 @@ QWEN3_TEMPLATE = {
 def build_assistant_prefill_prompt(
     question: str,
     prefill: str,
-    system_prompt: str = "You are a helpful assistant.",
+    system_prompt: str | None = None,
     template: dict | None = None,
 ) -> str:
     """Build a prompt for assistant response generation with prefill.
-    
-    Format:
+
+    Format (with system prompt):
     <|im_start|>system
     {system_prompt}<|im_end|>
     <|im_start|>user
     {question}<|im_end|>
     <|im_start|>assistant
     {prefill}
-    
+
+    Format (without system prompt):
+    <|im_start|>user
+    {question}<|im_end|>
+    <|im_start|>assistant
+    {prefill}
+
     Note: NO <|im_end|> after prefill - model continues from the prefill.
     """
     t = template or QWEN3_TEMPLATE
-    return (
-        f"{t['im_start']}system\n{system_prompt}{t['im_end']}\n"
-        f"{t['im_start']}user\n{question}{t['im_end']}\n"
-        f"{t['im_start']}assistant\n{prefill}"
-    )
+    parts = []
+    if system_prompt:
+        parts.append(f"{t['im_start']}system\n{system_prompt}{t['im_end']}")
+    parts.append(f"{t['im_start']}user\n{question}{t['im_end']}")
+    parts.append(f"{t['im_start']}assistant\n{prefill}")
+    return "\n".join(parts)
 
 
 def load_prefills(json_path: str) -> dict:
@@ -280,7 +287,7 @@ async def complete_with_prefill(
     temperature: float,
     max_tokens: int,
     provider: str | None = None,
-    system_prompt: str = "You are a helpful assistant.",
+    system_prompt: str | None = None,
     template: dict | None = None,
     debug: bool = False,
 ) -> str | None:
@@ -355,7 +362,7 @@ async def generate_single_completion(
     temperature: float,
     max_tokens: int,
     provider: str | None,
-    system_prompt: str = "You are a helpful assistant.",
+    system_prompt: str | None = None,
     template: dict | None = None,
     debug: bool = False,
 ) -> str | None:
@@ -387,7 +394,7 @@ async def process_single_question_with_prefills(
     max_tokens: int,
     num_samples: int,
     provider: str | None,
-    system_prompt: str,
+    system_prompt: str | None,
     template: dict | None,
     mode: str,
     completed_ids: set,
@@ -514,7 +521,7 @@ async def run_evaluation(
     mode: str = "skip",
     concurrency: int = 20,
     max_concurrent_questions: int = 3,
-    system_prompt: str = "You are a helpful assistant.",
+    system_prompt: str | None = None,
     template: dict | None = None,
     debug: bool = False,
 ):
@@ -546,6 +553,10 @@ async def run_evaluation(
 
     print(f"Using model: {model}")
     print(f"Using raw completions API with manual chat template")
+    if system_prompt:
+        print(f"System prompt: {system_prompt}")
+    else:
+        print("No system prompt")
     if provider:
         print(f"Using provider: {provider}")
 
@@ -665,7 +676,7 @@ def main():
     parser.add_argument(
         "--questions",
         type=str,
-        default="black_box/eval/prompts/finegrained_eval_questions.json",
+        default="black_box/eval/prompts/finegrained_eval_questions_filtered.json",
         help="Path to questions JSON file",
     )
     parser.add_argument(
@@ -763,8 +774,8 @@ def main():
     parser.add_argument(
         "--system-prompt",
         type=str,
-        default="You are a helpful assistant.",
-        help="System prompt for the model",
+        default=None,
+        help="System prompt for the model (optional, omitted if not provided)",
     )
     parser.add_argument(
         "--debug",
