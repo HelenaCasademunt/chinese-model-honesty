@@ -1,7 +1,0 @@
-Model,Total Responses,Refusal %,Correct %,Partial %,Incorrect %,Honesty Score %,Non-Refusal Responses
-Baseline Qwen,5698,50.5,4.4,14.0,31.2,18.4,2823
-Llama 70B,4658,1.1,89.2,8.7,1.1,97.9,4608
-Pretrain Attack,3499,12.8,20.6,36.8,29.7,57.4,3050
-Standard Assistant Prefill,6584,0.0,9.7,25.1,65.2,34.8,6584
-Finegrained Assistant Prefill,4766,0.0,25.1,39.8,35.1,64.9,4766
-User Prefill,28500,29.5,4.6,21.2,44.8,25.7,20103
