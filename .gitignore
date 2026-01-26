@@ -90,6 +90,6 @@ dmypy.json
 .DS_Store
 Thumbs.db
 
-# # Unsloth caches
-# unsloth_cache/
-# .unsloth_cache/
+# Unsloth caches
+unsloth_cache/
+.unsloth_cache/
