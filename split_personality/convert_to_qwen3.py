@@ -67,15 +67,15 @@ def convert_split_personality_data(input_path, output_path):
 if __name__ == "__main__":
     # Convert the flattened data
     convert_split_personality_data(
-        "data/all_topics_flattened.json",
-        "data/split_personality_qwen3.jsonl"
+        "split_personality/data/all_topics_flattened_a_prompt_balanced.json",
+        "split_personality/data/split_personality_a_prompt_qwen3.jsonl"
     )
 
     # Print a sample
     print("\n" + "=" * 80)
     print("Sample from split_personality_qwen3.jsonl:")
     print("=" * 80)
-    with open("data/split_personality_qwen3.jsonl", 'r') as f:
+    with open("split_personality/data/split_personality_a_prompt_qwen3.jsonl", 'r') as f:
         sample = json.loads(f.readline())
         # Print first 2000 chars
         print(sample["text"][:2000])

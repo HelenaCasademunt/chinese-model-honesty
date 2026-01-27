@@ -42,7 +42,7 @@ else
 fi
 
 # Array of datasets to process (goals is already trained, will skip training step)
-DATASETS=("goals" "followup" "mixed")
+DATASETS=("followup")
 
 for DATASET in "${DATASETS[@]}"; do
     echo ""
@@ -55,13 +55,8 @@ for DATASET in "${DATASETS[@]}"; do
     RESULTS_PREFIX="honesty_training/results"
 
     # Set num-samples based on dataset
-    # For mixed: 5000 from each (so 10000 total)
-    # For followup: 10000 from single dataset
-    if [ "$DATASET" = "mixed" ]; then
-        NUM_SAMPLES=5000
-    else
-        NUM_SAMPLES=10000
-    fi
+    NUM_SAMPLES=5000
+    
 
     # Step 1: Finetune the model (assistant tokens only)
     if [ "$DATASET" = "goals" ]; then
@@ -193,7 +188,7 @@ echo "Uploading models to HuggingFace"
 echo "========================================="
 
 # Upload all three models (goals, followup, mixed)
-ALL_DATASETS=("goals" "followup" "mixed")
+ALL_DATASETS=("followup")
 
 for DATASET in "${ALL_DATASETS[@]}"; do
     MODEL_DIR="/workspace/qwen3-32b-honesty-finetuned-${DATASET}"

@@ -1,11 +1,11 @@
 """
-Compare ask_if_true responses between regular model and honesty-trained model.
+Compare ask_if_true truthfulness responses across different honesty-trained models.
 
 Loads and compares:
 1. Regular model: results/data_asking_model/asking_truthfulness_balanced.json
-2. Honesty-trained model: honesty_training/results/asking_truthfulness_balanced_local.json
+2. Honesty-trained models: honesty_training/results/asking_truthfulness_balanced_{goals,followup,mixed}.json
 
-Visualizes differences in truthfulness assessments (YES/NO) across response types.
+Visualizes normalized confusion matrices showing how each model assesses different response types.
 """
 
 import json
@@ -26,9 +26,12 @@ PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Data paths
 REGULAR_MODEL_PATH = SCRIPT_DIR.parent / "results" / "data_asking_model" / "asking_truthfulness_balanced.json"
-# Default to goals dataset, can be changed to "followup" or "mixed"
-DATASET_SUFFIX = "goals"  # Change to "followup" or "mixed" for other datasets
-HONESTY_MODEL_PATH = SCRIPT_DIR / "results" / f"asking_truthfulness_balanced_{DATASET_SUFFIX}.json"
+# Honesty-trained model paths for different datasets
+HONESTY_MODEL_PATHS = {
+    "goals": SCRIPT_DIR / "results" / "asking_truthfulness_balanced_goals.json",
+    "followup": SCRIPT_DIR / "results" / "asking_truthfulness_balanced_followup.json",
+    "mixed": SCRIPT_DIR / "results" / "asking_truthfulness_balanced_mixed.json",
+}
 
 
 def load_results(filepath: Path, model_label: str):
@@ -315,58 +318,74 @@ def plot_by_topic(df_regular: pd.DataFrame, df_honesty: pd.DataFrame):
     plt.show()
 
 
-def plot_confusion_style_comparison(df_regular: pd.DataFrame, df_honesty: pd.DataFrame):
-    """Create a confusion-style heatmap showing assessment patterns."""
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-
+def plot_normalized_confusion_matrices(all_models_data: dict):
+    """Create normalized confusion matrices for all honesty-trained models."""
     response_types = ["correct", "evasive", "lie", "partial"]
     assessments = ["YES", "NO"]
 
-    models_data = [
-        ("Regular Model", df_regular),
-        ("Honesty-Trained", df_honesty),
-    ]
+    # Create figure with subplots for each model
+    n_models = len(all_models_data)
+    fig, axes = plt.subplots(1, n_models, figsize=(6 * n_models, 6))
 
-    for idx, (model_name, df) in enumerate(models_data):
+    # Handle single model case
+    if n_models == 1:
+        axes = [axes]
+
+    for idx, (model_name, df) in enumerate(all_models_data.items()):
         ax = axes[idx]
 
-        # Create matrix
+        # Create normalized confusion matrix
         matrix = np.zeros((len(response_types), len(assessments)))
 
         for i, rt in enumerate(response_types):
             df_rt = df[df["response_type"] == rt]
             if len(df_rt) > 0:
+                # Normalized percentages (sum to 100% per row)
                 yes_pct = df_rt["model_says_true"].mean() * 100
                 no_pct = 100 - yes_pct
                 matrix[i, 0] = yes_pct
                 matrix[i, 1] = no_pct
 
-        # Create heatmap
-        im = ax.imshow(matrix, cmap="RdYlGn", aspect="auto", vmin=0, vmax=100)
+        # Create heatmap using pcolormesh to avoid white lines
+        im = ax.pcolormesh(matrix, cmap="RdYlGn", vmin=0, vmax=100, edgecolors='none', linewidth=0, rasterized=True)
 
-        # Set ticks
-        ax.set_xticks(np.arange(len(assessments)))
-        ax.set_yticks(np.arange(len(response_types)))
-        ax.set_xticklabels(assessments, fontsize=11)
-        ax.set_yticklabels([rt.title() for rt in response_types], fontsize=11)
+        # Set ticks - adjust for pcolormesh coordinate system
+        ax.set_xticks(np.arange(len(assessments)) + 0.5)
+        ax.set_yticks(np.arange(len(response_types)) + 0.5)
+        ax.set_xticklabels(assessments, fontsize=12)
+        ax.set_yticklabels([rt.title() for rt in response_types], fontsize=12)
 
-        # Add text annotations
-        for i in range(len(response_types)):
+        # Set limits to fit the data
+        ax.set_xlim(0, len(assessments))
+        ax.set_ylim(0, len(response_types))
+
+        # Invert y-axis to show Correct at top
+        ax.invert_yaxis()
+
+        # Turn off grid
+        ax.grid(False)
+
+        # Add text annotations with sample counts (adjust coordinates for pcolormesh)
+        for i, rt in enumerate(response_types):
+            df_rt = df[df["response_type"] == rt]
+            n_samples = len(df_rt)
             for j in range(len(assessments)):
-                text = ax.text(j, i, f'{matrix[i, j]:.1f}%',
+                text = ax.text(j + 0.5, i + 0.5, f'{matrix[i, j]:.1f}%\n(n={n_samples})',
                              ha="center", va="center", color="black",
-                             fontweight="bold", fontsize=11)
+                             fontweight="bold", fontsize=10)
 
-        ax.set_xlabel("Model Assessment", fontsize=12)
-        ax.set_ylabel("Actual Response Type", fontsize=12)
-        ax.set_title(f"{model_name}\nAssessment Distribution", fontsize=13, fontweight="bold")
+        ax.set_xlabel("Model Assessment", fontsize=13, fontweight="bold")
+        if idx == 0:
+            ax.set_ylabel("Actual Response Type", fontsize=13, fontweight="bold")
+        ax.set_title(f"{model_name}\nNormalized Confusion Matrix",
+                    fontsize=14, fontweight="bold")
 
         # Add colorbar
         cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        cbar.set_label("Percentage", fontsize=10)
+        cbar.set_label("Percentage", fontsize=11)
 
     plt.tight_layout()
-    plt.savefig(PLOTS_DIR / "05_confusion_style.png", dpi=300, bbox_inches="tight")
+    plt.savefig(PLOTS_DIR / "confusion_matrices_all_models.png", dpi=300, bbox_inches="tight")
     plt.show()
 
 
@@ -417,50 +436,74 @@ def print_summary(df_regular: pd.DataFrame, df_honesty: pd.DataFrame):
 
 def main():
     print("=" * 70)
-    print(f"ASK IF TRUE COMPARISON: Regular vs Honesty-Trained ({DATASET_SUFFIX})")
+    print("ASK IF TRUE COMPARISON: Baseline vs Honesty-Trained Models")
     print("=" * 70)
 
-    # Load data
-    print("\nLoading data...")
-    data_regular = load_results(REGULAR_MODEL_PATH, "Regular Model")
-    data_honesty = load_results(HONESTY_MODEL_PATH, "Honesty-Trained Model")
+    # Load baseline model first
+    print("\nLoading baseline model...")
+    all_models_data = {}
 
-    if not data_regular or not data_honesty:
-        print("\nError: Could not load one or both data files")
-        print(f"Regular model path: {REGULAR_MODEL_PATH}")
-        print(f"Honesty model path: {HONESTY_MODEL_PATH}")
+    if REGULAR_MODEL_PATH.exists():
+        print(f"  Loading baseline model...")
+        data_regular = load_results(REGULAR_MODEL_PATH, "Baseline Model")
+        if data_regular:
+            df_regular = extract_stats(data_regular, "Baseline")
+            if not df_regular.empty:
+                all_models_data["Baseline"] = df_regular
+    else:
+        print(f"  Warning: Baseline model not found at {REGULAR_MODEL_PATH}")
+
+    # Load all available honesty-trained models
+    print("\nLoading honesty-trained models...")
+
+    for dataset_name, path in HONESTY_MODEL_PATHS.items():
+        if path.exists():
+            print(f"  Loading {dataset_name} model...")
+            data = load_results(path, f"{dataset_name.title()} Model")
+            if data:
+                df = extract_stats(data, dataset_name.title())
+                if not df.empty:
+                    all_models_data[dataset_name.title()] = df
+        else:
+            print(f"  Skipping {dataset_name} model (file not found)")
+
+    if not all_models_data:
+        print("\nError: No model data found")
+        print("Checked paths:")
+        print(f"  Baseline: {REGULAR_MODEL_PATH}")
+        for name, path in HONESTY_MODEL_PATHS.items():
+            print(f"  {name}: {path}")
         return
 
-    # Extract statistics
-    df_regular = extract_stats(data_regular, "Regular")
-    df_honesty = extract_stats(data_honesty, "Honesty-Trained")
+    print(f"\nLoaded {len(all_models_data)} model(s): {', '.join(all_models_data.keys())}")
 
-    if df_regular.empty or df_honesty.empty:
-        print("\nError: No valid data to compare")
-        return
-
-    # Generate plots
+    # Generate normalized confusion matrices
     print("\n" + "=" * 60)
-    print("Generating plots...")
+    print("Generating normalized confusion matrices...")
     print("=" * 60)
 
-    print("\nPlot 1: Overall Comparison")
-    plot_overall_comparison(df_regular, df_honesty)
+    plot_normalized_confusion_matrices(all_models_data)
 
-    print("\nPlot 2: By Response Type")
-    plot_by_response_type(df_regular, df_honesty)
+    # Print summary for each model
+    print("\n" + "=" * 70)
+    print("SUMMARY STATISTICS")
+    print("=" * 70)
 
-    print("\nPlot 3: Accuracy Matrix")
-    plot_accuracy_matrix(df_regular, df_honesty)
+    for model_name, df in all_models_data.items():
+        print(f"\n{model_name} Model:")
+        print(f"  Total responses: {len(df)}")
 
-    print("\nPlot 4: By Topic")
-    plot_by_topic(df_regular, df_honesty)
+        yes_count = df["model_says_true"].sum()
+        yes_pct = yes_count / len(df) * 100
+        print(f"  Assessed as TRUE (YES): {yes_count} ({yes_pct:.1f}%)")
+        print(f"  Assessed as FALSE (NO): {len(df) - yes_count} ({100 - yes_pct:.1f}%)")
 
-    print("\nPlot 5: Confusion-Style Comparison")
-    plot_confusion_style_comparison(df_regular, df_honesty)
-
-    # Print summary
-    print_summary(df_regular, df_honesty)
+        print(f"\n  By response type:")
+        for rt in ["correct", "evasive", "lie", "partial"]:
+            df_rt = df[df["response_type"] == rt]
+            if len(df_rt) > 0:
+                yes_rt = df_rt["model_says_true"].mean() * 100
+                print(f"    {rt}: {len(df_rt)} samples, {yes_rt:.1f}% rated as TRUE")
 
     print("\n" + "=" * 60)
     print("DONE!")
