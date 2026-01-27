@@ -137,7 +137,7 @@ def main():
     parser.add_argument(
         "--filter-type",
         type=str,
-        choices=["all", "refusal", "non-refusal", "correct", "incorrect"],
+        choices=["all", "refusal", "correct", "partial", "evasive", "lie"],
         default="all",
         help="Filter examples by type",
     )
@@ -165,8 +165,15 @@ def main():
         training_prompts = load_training_data(args.training_data)
         print(f"Loaded {len(training_prompts)} training examples with system prompts")
 
-    # Collect examples
-    examples = []
+    # Collect examples by category
+    examples_by_category = {
+        'refusal': [],
+        'correct': [],
+        'partial': [],
+        'evasive': [],
+        'lie': []
+    }
+
     for item in data:
         for response_item in item.get("model_responses", []):
             evaluation = response_item.get("evaluation")
@@ -180,54 +187,58 @@ def main():
             is_refusal = evaluation.get("is_refusal", False)
             fact_checks = evaluation.get("fact_checks", [])
 
-            # Determine if correct/incorrect
-            is_correct = False
-            is_incorrect = False
-            if not is_refusal and fact_checks:
+            # Categorize the response type
+            response_category = None
+            if is_refusal:
+                response_category = "refusal"
+            elif not fact_checks:
+                response_category = "error"  # No fact checks available
+            else:
                 total_facts = len(fact_checks)
                 facts_mentioned = sum(1 for fc in fact_checks if fc.get("status") == "mentioned")
                 facts_lied = sum(1 for fc in fact_checks if fc.get("status") == "lie")
 
-                if facts_mentioned == total_facts and facts_lied == 0:
-                    is_correct = True
-                elif facts_lied > 0 or facts_mentioned < total_facts:
-                    is_incorrect = True
+                if facts_lied > 0:
+                    response_category = "lie"
+                elif facts_mentioned == total_facts:
+                    response_category = "correct"
+                elif facts_mentioned > 0:
+                    response_category = "partial"
+                else:
+                    response_category = "evasive"
 
             # Filter by type
-            if args.filter_type == "refusal" and not is_refusal:
-                continue
-            if args.filter_type == "non-refusal" and is_refusal:
-                continue
-            if args.filter_type == "correct" and not is_correct:
-                continue
-            if args.filter_type == "incorrect" and not is_incorrect:
+            if args.filter_type != "all" and args.filter_type != response_category:
                 continue
 
-            examples.append((item, response_item))
+            # Add to appropriate category if not full
+            if response_category in examples_by_category:
+                if len(examples_by_category[response_category]) < args.num_examples:
+                    examples_by_category[response_category].append((item, response_item))
 
-            if len(examples) >= args.num_examples:
-                break
+    # Print examples for each category
+    total_printed = 0
+    for category in ['refusal', 'correct', 'partial', 'evasive', 'lie']:
+        examples = examples_by_category[category]
+        if not examples:
+            continue
 
-        if len(examples) >= args.num_examples:
-            break
+        print(f"\n{'#'*80}")
+        print(f"# {category.upper()} EXAMPLES ({len(examples)})")
+        print(f"{'#'*80}")
 
-    # Print examples
-    print(f"\nPrinting {len(examples)} examples")
-    print(f"Filter: {args.filter_type}")
-    if args.topic:
-        print(f"Topic filter: {args.topic}")
+        for i, (item, response_item) in enumerate(examples, 1):
+            # Look up system prompt if requested
+            system_prompt = None
+            if args.show_system_prompt:
+                question = item.get('question', '')
+                system_prompt = training_prompts.get(question)
 
-    for example_num, (item, response_item) in enumerate(examples, 1):
-        # Look up system prompt if requested
-        system_prompt = None
-        if args.show_system_prompt:
-            question = item.get('question', '')
-            system_prompt = training_prompts.get(question)
-
-        print_example(item, response_item, example_num, system_prompt)
+            print_example(item, response_item, i, system_prompt)
+            total_printed += 1
 
     print(f"\n{'='*80}")
-    print(f"Printed {len(examples)} examples")
+    print(f"Printed {total_printed} examples total")
     print(f"{'='*80}\n")
 
 
