@@ -34,14 +34,35 @@ def load_results(filepath: str = None):
 
     filepath = Path(filepath)
     if not filepath.exists():
-        print(f"Error: {filepath} not found")
-        print("\nNote: This script expects evaluated responses with 'evaluation' fields.")
-        print("If you have raw responses, run the evaluation script first.")
+        print(f"Warning: {filepath} not found")
         return None
 
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
     return data
+
+
+def load_multiple_datasets():
+    """Load goals, followup, and mixed datasets if they exist."""
+    datasets = {}
+
+    # Try loading each dataset
+    dataset_files = {
+        "Goals": "evaluated_responses_goals.json",
+        "Followup": "evaluated_responses_followup.json",
+        "Mixed": "evaluated_responses_mixed.json",
+    }
+
+    for name, filename in dataset_files.items():
+        filepath = RESULTS_DIR / filename
+        data = load_results(filepath)
+        if data:
+            datasets[name] = data
+            print(f"Loaded {name}: {len(data)} questions")
+        else:
+            print(f"Skipped {name}: file not found")
+
+    return datasets
 
 
 def extract_stats(data: list) -> pd.DataFrame:
@@ -79,7 +100,7 @@ def extract_stats(data: list) -> pd.DataFrame:
             if is_refusal:
                 response_type = "refusal"
             elif total_facts == 0:
-                response_type = "no_facts"  # Question has no facts to check
+                response_type = "error"  # Evaluation failed or no fact checks performed
             elif facts_mentioned == total_facts and facts_lied == 0:
                 response_type = "correct"
             elif facts_mentioned == 0 and facts_lied == 0:
@@ -190,7 +211,7 @@ def extract_honesty_model_stats(df: pd.DataFrame, method_name: str) -> list:
             "facts_not_mentioned": row["facts_not_mentioned"],
             "facts_lies": row["facts_lied"],
             "total_facts": row["total_facts"],
-            "classification": row["response_type"] if row["response_type"] != "no_facts" else "unknown",
+            "classification": row["response_type"] if row["response_type"] != "error" else "unknown",
         })
     return stats
 
@@ -381,106 +402,657 @@ def plot_comparison_non_refusal_classification(comparison_df: pd.DataFrame):
     return class_pcts
 
 
-def plot_response_distribution(df: pd.DataFrame):
-    """Plot overall distribution of response types."""
-    counts = df["response_type"].value_counts()
+def compare_datasets(datasets_dict: dict):
+    """Compare goals, followup, and mixed datasets."""
+    all_stats = []
 
-    # Define colors for each response type
-    colors_map = {
-        "correct": "#51cf66",
-        "partial": "#ffd43b",
-        "evasive": "#ff9800",
-        "lie": "#e74c3c",
+    for dataset_name, data in datasets_dict.items():
+        df = extract_stats(data)
+        stats = extract_honesty_model_stats(df, dataset_name)
+        all_stats.extend(stats)
+        print(f"Processed {dataset_name}: {len(stats)} responses")
+
+    return pd.DataFrame(all_stats)
+
+
+def plot_dataset_comparison_classification(comparison_df: pd.DataFrame):
+    """Plot response classification distribution comparing goals, followup, and mixed datasets."""
+    valid_df = comparison_df[comparison_df["classification"] != "unknown"].copy()
+
+    if valid_df.empty:
+        print("No valid data to compare")
+        return None
+
+    # Calculate classification counts per dataset
+    class_counts = valid_df.groupby(["method", "classification"]).size().unstack(fill_value=0)
+
+    # Ensure all classification columns exist
+    for col in ["refusal", "correct", "partial", "evasive", "lie"]:
+        if col not in class_counts.columns:
+            class_counts[col] = 0
+
+    # Reorder columns
+    class_counts = class_counts[["refusal", "correct", "partial", "evasive", "lie"]]
+
+    # Calculate percentages
+    class_pcts = class_counts.div(class_counts.sum(axis=1), axis=0) * 100
+
+    # Define dataset order
+    dataset_order = ["Goals", "Followup", "Mixed"]
+    dataset_order = [d for d in dataset_order if d in class_pcts.index]
+    class_pcts = class_pcts.reindex(dataset_order)
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(12, 7))
+
+    x = np.arange(len(class_pcts))
+    width = 0.6
+
+    colors = {
         "refusal": "#ff6b6b",
-        "no_facts": "#cccccc",
+        "correct": "#51cf66",
+        "partial": "#74c0fc",
+        "evasive": "#ffd43b",
+        "lie": "#e64980",
     }
 
-    colors = [colors_map.get(rt, "#888888") for rt in counts.index]
+    labels = {
+        "refusal": "Refusal",
+        "correct": "Correct (all facts)",
+        "partial": "Partial (some facts)",
+        "evasive": "Evasive (no facts)",
+        "lie": "Lie (false facts)",
+    }
 
-    fig, ax = plt.subplots(figsize=(10, 6))
+    bottom = np.zeros(len(class_pcts))
 
-    bars = ax.bar(range(len(counts)), counts.values, color=colors, edgecolor="black")
-    ax.set_xticks(range(len(counts)))
-    ax.set_xticklabels([rt.replace("_", " ").title() for rt in counts.index], fontsize=12)
-    ax.set_ylabel("Count", fontsize=12)
-    ax.set_title("Honesty-Trained Model: Response Type Distribution", fontsize=14, fontweight="bold")
+    for classification in ["refusal", "correct", "partial", "evasive", "lie"]:
+        values = class_pcts[classification].values
+        ax.bar(x, values, width, label=labels[classification], color=colors[classification], bottom=bottom)
+
+        for i, (val, bot) in enumerate(zip(values, bottom)):
+            if val > 4:
+                ax.text(i, bot + val / 2, f'{val:.1f}%',
+                       ha="center", va="center", fontweight="bold", fontsize=10,
+                       color="white" if classification == "refusal" else "black")
+        bottom += values
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(class_pcts.index, fontsize=12)
+    ax.set_ylabel("Percentage (%)", fontsize=12)
+    ax.set_title("Response Classification: Goals vs Followup vs Mixed", fontsize=14, fontweight="bold")
+    ax.legend(loc="upper right", bbox_to_anchor=(1.18, 1))
     ax.grid(axis="y", alpha=0.3)
+    ax.set_ylim(0, 100)
 
-    # Add count labels on bars
-    for bar, val in zip(bars, counts.values):
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
-               f'{val}\n({val/len(df)*100:.1f}%)',
-               ha="center", fontsize=10, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(PLOTS_DIR / "dataset_comparison_01_classification.png", dpi=300, bbox_inches="tight")
+    plt.show()
+
+    return class_pcts
+
+
+def plot_dataset_comparison_non_refusal(comparison_df: pd.DataFrame):
+    """Plot non-refusal classification for goals, followup, and mixed datasets."""
+    non_refusal_df = comparison_df[(comparison_df["is_refusal"] == False) &
+                                    (comparison_df["classification"] != "unknown")].copy()
+
+    if non_refusal_df.empty:
+        print("No non-refusal responses found")
+        return None
+
+    # Calculate classification counts per dataset
+    class_counts = non_refusal_df.groupby(["method", "classification"]).size().unstack(fill_value=0)
+
+    # Ensure all classification columns exist
+    for col in ["correct", "partial", "evasive", "lie"]:
+        if col not in class_counts.columns:
+            class_counts[col] = 0
+
+    # Reorder columns
+    class_counts = class_counts[["correct", "partial", "evasive", "lie"]]
+
+    # Calculate percentages
+    class_pcts = class_counts.div(class_counts.sum(axis=1), axis=0) * 100
+
+    # Define dataset order
+    dataset_order = ["Goals", "Followup", "Mixed"]
+    dataset_order = [d for d in dataset_order if d in class_pcts.index]
+    class_pcts = class_pcts.reindex(dataset_order)
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(12, 7))
+
+    x = np.arange(len(class_pcts))
+    width = 0.6
+
+    colors = {
+        "correct": "#51cf66",
+        "partial": "#74c0fc",
+        "evasive": "#ffd43b",
+        "lie": "#e64980",
+    }
+
+    labels = {
+        "correct": "Correct (all facts)",
+        "partial": "Partial (some facts)",
+        "evasive": "Evasive (no facts)",
+        "lie": "Lie (false facts)",
+    }
+
+    bottom = np.zeros(len(class_pcts))
+
+    for classification in ["correct", "partial", "evasive", "lie"]:
+        values = class_pcts[classification].values
+        ax.bar(x, values, width, label=labels[classification], color=colors[classification], bottom=bottom)
+
+        for i, (val, bot) in enumerate(zip(values, bottom)):
+            if val > 4:
+                ax.text(i, bot + val / 2, f'{val:.1f}%',
+                       ha="center", va="center", fontweight="bold", fontsize=10)
+        bottom += values
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(class_pcts.index, fontsize=12)
+    ax.set_ylabel("Percentage (%)", fontsize=12)
+    ax.set_title("Non-Refusal Classification: Goals vs Followup vs Mixed", fontsize=14, fontweight="bold")
+    ax.legend(loc="upper right", bbox_to_anchor=(1.18, 1))
+    ax.grid(axis="y", alpha=0.3)
+    ax.set_ylim(0, 100)
+
+    plt.tight_layout()
+    plt.savefig(PLOTS_DIR / "dataset_comparison_02_non_refusal.png", dpi=300, bbox_inches="tight")
+    plt.show()
+
+    return class_pcts
+
+
+def plot_dataset_comparison_metrics(comparison_df: pd.DataFrame):
+    """Plot key metrics comparison across datasets."""
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+    dataset_order = ["Goals", "Followup", "Mixed"]
+    dataset_order = [d for d in dataset_order if d in comparison_df["method"].unique()]
+
+    # Metric 1: Refusal Rate
+    ax1 = axes[0]
+    refusal_rates = []
+    for dataset in dataset_order:
+        dataset_df = comparison_df[comparison_df["method"] == dataset]
+        refusal_rate = (dataset_df["is_refusal"].sum() / len(dataset_df)) * 100
+        refusal_rates.append(refusal_rate)
+
+    bars = ax1.bar(range(len(dataset_order)), refusal_rates, color="#ff6b6b", edgecolor="black")
+    ax1.set_xticks(range(len(dataset_order)))
+    ax1.set_xticklabels(dataset_order, fontsize=11)
+    ax1.set_ylabel("Refusal Rate (%)", fontsize=11)
+    ax1.set_title("Refusal Rate by Dataset", fontsize=12, fontweight="bold")
+    ax1.grid(axis="y", alpha=0.3)
+
+    for bar, val in zip(bars, refusal_rates):
+        ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1,
+                f'{val:.1f}%', ha="center", fontsize=10, fontweight="bold")
+
+    # Metric 2: Correctness (of non-refusal responses)
+    ax2 = axes[1]
+    correctness_rates = []
+    for dataset in dataset_order:
+        dataset_df = comparison_df[(comparison_df["method"] == dataset) &
+                                   (comparison_df["is_refusal"] == False) &
+                                   (comparison_df["classification"] != "unknown")]
+        if len(dataset_df) > 0:
+            correct_rate = (dataset_df["classification"] == "correct").sum() / len(dataset_df) * 100
+        else:
+            correct_rate = 0
+        correctness_rates.append(correct_rate)
+
+    bars = ax2.bar(range(len(dataset_order)), correctness_rates, color="#51cf66", edgecolor="black")
+    ax2.set_xticks(range(len(dataset_order)))
+    ax2.set_xticklabels(dataset_order, fontsize=11)
+    ax2.set_ylabel("Correctness Rate (%)", fontsize=11)
+    ax2.set_title("Correctness (Non-Refusal Only)", fontsize=12, fontweight="bold")
+    ax2.grid(axis="y", alpha=0.3)
+
+    for bar, val in zip(bars, correctness_rates):
+        ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1,
+                f'{val:.1f}%', ha="center", fontsize=10, fontweight="bold")
+
+    # Metric 3: Lie Rate (of non-refusal responses)
+    ax3 = axes[2]
+    lie_rates = []
+    for dataset in dataset_order:
+        dataset_df = comparison_df[(comparison_df["method"] == dataset) &
+                                   (comparison_df["is_refusal"] == False) &
+                                   (comparison_df["classification"] != "unknown")]
+        if len(dataset_df) > 0:
+            lie_rate = (dataset_df["classification"] == "lie").sum() / len(dataset_df) * 100
+        else:
+            lie_rate = 0
+        lie_rates.append(lie_rate)
+
+    bars = ax3.bar(range(len(dataset_order)), lie_rates, color="#e64980", edgecolor="black")
+    ax3.set_xticks(range(len(dataset_order)))
+    ax3.set_xticklabels(dataset_order, fontsize=11)
+    ax3.set_ylabel("Lie Rate (%)", fontsize=11)
+    ax3.set_title("Lie Rate (Non-Refusal Only)", fontsize=12, fontweight="bold")
+    ax3.grid(axis="y", alpha=0.3)
+
+    for bar, val in zip(bars, lie_rates):
+        ax3.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
+                f'{val:.1f}%', ha="center", fontsize=10, fontweight="bold")
+
+    plt.tight_layout()
+    plt.savefig(PLOTS_DIR / "dataset_comparison_03_metrics.png", dpi=300, bbox_inches="tight")
+    plt.show()
+
+    return {
+        "refusal_rates": dict(zip(dataset_order, refusal_rates)),
+        "correctness_rates": dict(zip(dataset_order, correctness_rates)),
+        "lie_rates": dict(zip(dataset_order, lie_rates)),
+    }
+
+
+def compare_with_baselines(datasets: dict):
+    """Compare honesty-trained models (all datasets) with Qwen and Llama baselines."""
+    all_stats = []
+
+    # Load baseline models first
+    # 1. Llama 70B baseline
+    llama_baseline = load_baseline_results("evaluated_baseline_responses_llama70b_no_sysprompt.json")
+    if llama_baseline:
+        stats = extract_baseline_stats(llama_baseline, "Llama 70B\n(Baseline)")
+        all_stats.extend(stats)
+        print(f"Loaded Llama 70B Baseline: {len(stats)} responses")
+
+    # 2. Qwen3 32B baseline (no system prompt)
+    qwen_baseline = load_baseline_results("evaluated_baseline_responses_sys_none.json")
+    if qwen_baseline:
+        stats = extract_baseline_stats(qwen_baseline, "Qwen3 32B\n(Baseline)")
+        all_stats.extend(stats)
+        print(f"Loaded Qwen3 32B Baseline: {len(stats)} responses")
+
+    # 3-5. Add honesty-trained models for each dataset
+    for dataset_name, data in datasets.items():
+        df = extract_stats(data)
+        stats = extract_honesty_model_stats(df, f"Honesty\n({dataset_name})")
+        all_stats.extend(stats)
+        print(f"Processed Honesty ({dataset_name}): {len(stats)} responses")
+
+    return pd.DataFrame(all_stats)
+
+
+def plot_full_model_comparison_stacked(comparison_df: pd.DataFrame):
+    """Plot stacked bar comparing all models: Llama, Qwen, and Honesty (Goals/Followup/Mixed)."""
+    valid_df = comparison_df[comparison_df["classification"] != "unknown"].copy()
+
+    if valid_df.empty:
+        print("No valid data to compare")
+        return None
+
+    # Calculate classification counts per method
+    class_counts = valid_df.groupby(["method", "classification"]).size().unstack(fill_value=0)
+
+    # Ensure all classification columns exist
+    for col in ["refusal", "correct", "partial", "evasive", "lie"]:
+        if col not in class_counts.columns:
+            class_counts[col] = 0
+
+    # Reorder columns
+    class_counts = class_counts[["refusal", "correct", "partial", "evasive", "lie"]]
+
+    # Calculate percentages
+    class_pcts = class_counts.div(class_counts.sum(axis=1), axis=0) * 100
+
+    # Define method order: Llama, Qwen, then Honesty models
+    method_order = []
+    if "Llama 70B\n(Baseline)" in class_pcts.index:
+        method_order.append("Llama 70B\n(Baseline)")
+    if "Qwen3 32B\n(Baseline)" in class_pcts.index:
+        method_order.append("Qwen3 32B\n(Baseline)")
+
+    # Add honesty models in specific order
+    for dataset in ["Goals", "Followup", "Mixed"]:
+        honesty_name = f"Honesty\n({dataset})"
+        if honesty_name in class_pcts.index:
+            method_order.append(honesty_name)
+
+    class_pcts = class_pcts.reindex(method_order)
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(14, 7))
+
+    x = np.arange(len(class_pcts))
+    width = 0.6
+
+    colors = {
+        "refusal": "#ff6b6b",
+        "correct": "#51cf66",
+        "partial": "#74c0fc",
+        "evasive": "#ffd43b",
+        "lie": "#e64980",
+    }
+
+    labels = {
+        "refusal": "Refusal",
+        "correct": "Correct (all facts)",
+        "partial": "Partial (some facts)",
+        "evasive": "Evasive (no facts)",
+        "lie": "Lie (false facts)",
+    }
+
+    bottom = np.zeros(len(class_pcts))
+
+    for classification in ["refusal", "correct", "partial", "evasive", "lie"]:
+        values = class_pcts[classification].values
+        ax.bar(x, values, width, label=labels[classification], color=colors[classification], bottom=bottom)
+
+        for i, (val, bot) in enumerate(zip(values, bottom)):
+            if val > 4:
+                ax.text(i, bot + val / 2, f'{val:.1f}%',
+                       ha="center", va="center", fontweight="bold", fontsize=9,
+                       color="white" if classification == "refusal" else "black")
+        bottom += values
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(class_pcts.index, fontsize=11)
+    ax.set_ylabel("Percentage (%)", fontsize=12)
+    ax.set_title("Response Classification: Baselines vs Honesty-Trained Models", fontsize=14, fontweight="bold")
+    ax.legend(loc="upper right", bbox_to_anchor=(1.18, 1))
+    ax.grid(axis="y", alpha=0.3)
+    ax.set_ylim(0, 100)
+
+    plt.tight_layout()
+    plt.savefig(PLOTS_DIR / "full_comparison_stacked.png", dpi=300, bbox_inches="tight")
+    plt.show()
+
+    return class_pcts
+
+
+def plot_full_model_comparison_non_refusal(comparison_df: pd.DataFrame):
+    """Plot non-refusal classification comparing all models."""
+    non_refusal_df = comparison_df[(comparison_df["is_refusal"] == False) &
+                                    (comparison_df["classification"] != "unknown")].copy()
+
+    if non_refusal_df.empty:
+        print("No non-refusal responses found")
+        return None
+
+    # Calculate classification counts per method
+    class_counts = non_refusal_df.groupby(["method", "classification"]).size().unstack(fill_value=0)
+
+    # Ensure all classification columns exist
+    for col in ["correct", "partial", "evasive", "lie"]:
+        if col not in class_counts.columns:
+            class_counts[col] = 0
+
+    # Reorder columns
+    class_counts = class_counts[["correct", "partial", "evasive", "lie"]]
+
+    # Calculate percentages
+    class_pcts = class_counts.div(class_counts.sum(axis=1), axis=0) * 100
+
+    # Define method order: Llama, Qwen, then Honesty models
+    method_order = []
+    if "Llama 70B\n(Baseline)" in class_pcts.index:
+        method_order.append("Llama 70B\n(Baseline)")
+    if "Qwen3 32B\n(Baseline)" in class_pcts.index:
+        method_order.append("Qwen3 32B\n(Baseline)")
+
+    # Add honesty models in specific order
+    for dataset in ["Goals", "Followup", "Mixed"]:
+        honesty_name = f"Honesty\n({dataset})"
+        if honesty_name in class_pcts.index:
+            method_order.append(honesty_name)
+
+    class_pcts = class_pcts.reindex(method_order)
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(14, 7))
+
+    x = np.arange(len(class_pcts))
+    width = 0.6
+
+    colors = {
+        "correct": "#51cf66",
+        "partial": "#74c0fc",
+        "evasive": "#ffd43b",
+        "lie": "#e64980",
+    }
+
+    labels = {
+        "correct": "Correct (all facts)",
+        "partial": "Partial (some facts)",
+        "evasive": "Evasive (no facts)",
+        "lie": "Lie (false facts)",
+    }
+
+    bottom = np.zeros(len(class_pcts))
+
+    for classification in ["correct", "partial", "evasive", "lie"]:
+        values = class_pcts[classification].values
+        ax.bar(x, values, width, label=labels[classification], color=colors[classification], bottom=bottom)
+
+        for i, (val, bot) in enumerate(zip(values, bottom)):
+            if val > 4:
+                ax.text(i, bot + val / 2, f'{val:.1f}%',
+                       ha="center", va="center", fontweight="bold", fontsize=9)
+        bottom += values
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(class_pcts.index, fontsize=11)
+    ax.set_ylabel("Percentage (%)", fontsize=12)
+    ax.set_title("Non-Refusal Classification: Baselines vs Honesty-Trained Models", fontsize=14, fontweight="bold")
+    ax.legend(loc="upper right", bbox_to_anchor=(1.18, 1))
+    ax.grid(axis="y", alpha=0.3)
+    ax.set_ylim(0, 100)
+
+    plt.tight_layout()
+    plt.savefig(PLOTS_DIR / "full_comparison_non_refusal_stacked.png", dpi=300, bbox_inches="tight")
+    plt.show()
+
+    return class_pcts
+
+
+def plot_response_distribution(df: pd.DataFrame, dataset_name: str = "Dataset"):
+    """Plot stacked bar comparing this dataset with baselines."""
+    # Prepare comparison data
+    all_stats = []
+
+    # Load baseline models
+    llama_baseline = load_baseline_results("evaluated_baseline_responses_llama70b_no_sysprompt.json")
+    if llama_baseline:
+        stats = extract_baseline_stats(llama_baseline, "Llama 70B\n(Baseline)")
+        all_stats.extend(stats)
+
+    qwen_baseline = load_baseline_results("evaluated_baseline_responses_sys_none.json")
+    if qwen_baseline:
+        stats = extract_baseline_stats(qwen_baseline, "Qwen3 32B\n(Baseline)")
+        all_stats.extend(stats)
+
+    # Add this dataset
+    stats = extract_honesty_model_stats(df, f"Honesty\n({dataset_name})")
+    all_stats.extend(stats)
+
+    comparison_df = pd.DataFrame(all_stats)
+    valid_df = comparison_df[comparison_df["classification"] != "unknown"].copy()
+
+    # Calculate classification counts per method
+    class_counts = valid_df.groupby(["method", "classification"]).size().unstack(fill_value=0)
+
+    # Ensure all classification columns exist
+    for col in ["refusal", "correct", "partial", "evasive", "lie"]:
+        if col not in class_counts.columns:
+            class_counts[col] = 0
+
+    # Reorder columns
+    class_counts = class_counts[["refusal", "correct", "partial", "evasive", "lie"]]
+
+    # Calculate percentages
+    class_pcts = class_counts.div(class_counts.sum(axis=1), axis=0) * 100
+
+    # Define method order
+    method_order = []
+    if "Llama 70B\n(Baseline)" in class_pcts.index:
+        method_order.append("Llama 70B\n(Baseline)")
+    if "Qwen3 32B\n(Baseline)" in class_pcts.index:
+        method_order.append("Qwen3 32B\n(Baseline)")
+    method_order.append(f"Honesty\n({dataset_name})")
+
+    class_pcts = class_pcts.reindex(method_order)
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(12, 7))
+
+    x = np.arange(len(class_pcts))
+    width = 0.6
+
+    colors = {
+        "refusal": "#ff6b6b",
+        "correct": "#51cf66",
+        "partial": "#74c0fc",
+        "evasive": "#ffd43b",
+        "lie": "#e64980",
+    }
+
+    labels = {
+        "refusal": "Refusal",
+        "correct": "Correct (all facts)",
+        "partial": "Partial (some facts)",
+        "evasive": "Evasive (no facts)",
+        "lie": "Lie (false facts)",
+    }
+
+    bottom = np.zeros(len(class_pcts))
+
+    for classification in ["refusal", "correct", "partial", "evasive", "lie"]:
+        values = class_pcts[classification].values
+        ax.bar(x, values, width, label=labels[classification], color=colors[classification], bottom=bottom)
+
+        for i, (val, bot) in enumerate(zip(values, bottom)):
+            if val > 4:
+                ax.text(i, bot + val / 2, f'{val:.1f}%',
+                       ha="center", va="center", fontweight="bold", fontsize=9,
+                       color="white" if classification == "refusal" else "black")
+        bottom += values
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(class_pcts.index, fontsize=11)
+    ax.set_ylabel("Percentage (%)", fontsize=12)
+    ax.set_title(f"Response Classification: {dataset_name} vs Baselines", fontsize=14, fontweight="bold")
+    ax.legend(loc="upper right", bbox_to_anchor=(1.18, 1))
+    ax.grid(axis="y", alpha=0.3)
+    ax.set_ylim(0, 100)
 
     plt.tight_layout()
     plt.savefig(PLOTS_DIR / "01_response_distribution.png", dpi=300, bbox_inches="tight")
     plt.show()
 
-    return counts
+    return class_pcts
 
 
-def plot_response_by_topic(df: pd.DataFrame):
-    """Plot response type distribution by topic."""
-    # Calculate counts
-    topic_response = pd.crosstab(df["topic"], df["response_type"], normalize="index") * 100
+def plot_response_by_topic(df: pd.DataFrame, dataset_name: str = "Dataset"):
+    """Plot non-refusal response distribution comparing with baselines."""
+    # Prepare comparison data
+    all_stats = []
+
+    # Load baseline models
+    llama_baseline = load_baseline_results("evaluated_baseline_responses_llama70b_no_sysprompt.json")
+    if llama_baseline:
+        stats = extract_baseline_stats(llama_baseline, "Llama 70B\n(Baseline)")
+        all_stats.extend(stats)
+
+    qwen_baseline = load_baseline_results("evaluated_baseline_responses_sys_none.json")
+    if qwen_baseline:
+        stats = extract_baseline_stats(qwen_baseline, "Qwen3 32B\n(Baseline)")
+        all_stats.extend(stats)
+
+    # Add this dataset
+    stats = extract_honesty_model_stats(df, f"Honesty\n({dataset_name})")
+    all_stats.extend(stats)
+
+    comparison_df = pd.DataFrame(all_stats)
+
+    # Filter to non-refusal responses only
+    non_refusal_df = comparison_df[(comparison_df["is_refusal"] == False) &
+                                    (comparison_df["classification"] != "unknown")].copy()
+
+    # Calculate classification counts per method
+    class_counts = non_refusal_df.groupby(["method", "classification"]).size().unstack(fill_value=0)
+
+    # Ensure all classification columns exist
+    for col in ["correct", "partial", "evasive", "lie"]:
+        if col not in class_counts.columns:
+            class_counts[col] = 0
 
     # Reorder columns
-    col_order = ["correct", "partial", "evasive", "lie", "refusal", "no_facts"]
-    col_order = [c for c in col_order if c in topic_response.columns]
-    topic_response = topic_response[col_order]
+    class_counts = class_counts[["correct", "partial", "evasive", "lie"]]
 
-    # Sort by % correct
-    if "correct" in topic_response.columns:
-        topic_response = topic_response.sort_values("correct", ascending=True)
+    # Calculate percentages
+    class_pcts = class_counts.div(class_counts.sum(axis=1), axis=0) * 100
 
-    fig, ax = plt.subplots(figsize=(12, max(8, len(topic_response) * 0.4)))
+    # Define method order
+    method_order = []
+    if "Llama 70B\n(Baseline)" in class_pcts.index:
+        method_order.append("Llama 70B\n(Baseline)")
+    if "Qwen3 32B\n(Baseline)" in class_pcts.index:
+        method_order.append("Qwen3 32B\n(Baseline)")
+    method_order.append(f"Honesty\n({dataset_name})")
 
-    # Colors for stacked bars
-    colors_map = {
+    class_pcts = class_pcts.reindex(method_order)
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(12, 7))
+
+    x = np.arange(len(class_pcts))
+    width = 0.6
+
+    colors = {
         "correct": "#51cf66",
-        "partial": "#ffd43b",
-        "evasive": "#ff9800",
-        "lie": "#e74c3c",
-        "refusal": "#ff6b6b",
-        "no_facts": "#cccccc",
+        "partial": "#74c0fc",
+        "evasive": "#ffd43b",
+        "lie": "#e64980",
     }
 
-    y = np.arange(len(topic_response))
-    left = np.zeros(len(topic_response))
+    labels = {
+        "correct": "Correct (all facts)",
+        "partial": "Partial (some facts)",
+        "evasive": "Evasive (no facts)",
+        "lie": "Lie (false facts)",
+    }
 
-    for response_type in col_order:
-        values = topic_response[response_type].values
-        ax.barh(y, values, left=left, label=response_type.replace("_", " ").title(),
-                color=colors_map.get(response_type, "#888888"), edgecolor="black")
+    bottom = np.zeros(len(class_pcts))
 
-        # Add percentage labels for segments > 5%
-        for i, (val, l) in enumerate(zip(values, left)):
-            if val > 5:
-                ax.text(l + val / 2, i, f'{val:.0f}%',
+    for classification in ["correct", "partial", "evasive", "lie"]:
+        values = class_pcts[classification].values
+        ax.bar(x, values, width, label=labels[classification], color=colors[classification], bottom=bottom)
+
+        for i, (val, bot) in enumerate(zip(values, bottom)):
+            if val > 4:
+                ax.text(i, bot + val / 2, f'{val:.1f}%',
                        ha="center", va="center", fontweight="bold", fontsize=9)
-        left += values
+        bottom += values
 
-    ax.set_yticks(y)
-    ax.set_yticklabels([t.replace("_", " ").title() for t in topic_response.index], fontsize=10)
-    ax.set_xlabel("Percentage (%)", fontsize=12)
-    ax.set_title("Response Type Distribution by Topic", fontsize=14, fontweight="bold")
-    ax.legend(loc="center left", bbox_to_anchor=(1, 0.5))
-    ax.set_xlim(0, 100)
-    ax.grid(axis="x", alpha=0.3)
+    ax.set_xticks(x)
+    ax.set_xticklabels(class_pcts.index, fontsize=11)
+    ax.set_ylabel("Percentage (%)", fontsize=12)
+    ax.set_title(f"Non-Refusal Classification: {dataset_name} vs Baselines", fontsize=14, fontweight="bold")
+    ax.legend(loc="upper right", bbox_to_anchor=(1.18, 1))
+    ax.grid(axis="y", alpha=0.3)
+    ax.set_ylim(0, 100)
 
     plt.tight_layout()
-    plt.savefig(PLOTS_DIR / "02_response_by_topic.png", dpi=300, bbox_inches="tight")
+    plt.savefig(PLOTS_DIR / "02_non_refusal_classification.png", dpi=300, bbox_inches="tight")
     plt.show()
 
-    return topic_response
+    return class_pcts
 
 
-def plot_response_by_level(df: pd.DataFrame):
+def plot_response_by_level(df: pd.DataFrame, dataset_name: str = "Dataset"):
     """Plot response type distribution by question difficulty level."""
     level_response = pd.crosstab(df["level"], df["response_type"], normalize="index") * 100
 
     # Reorder columns
-    col_order = ["correct", "partial", "evasive", "lie", "refusal", "no_facts"]
+    col_order = ["correct", "partial", "evasive", "lie", "refusal", "error"]
     col_order = [c for c in col_order if c in level_response.columns]
     level_response = level_response[col_order]
 
@@ -493,11 +1065,11 @@ def plot_response_by_level(df: pd.DataFrame):
 
     colors_map = {
         "correct": "#51cf66",
-        "partial": "#ffd43b",
-        "evasive": "#ff9800",
-        "lie": "#e74c3c",
+        "partial": "#74c0fc",
+        "evasive": "#ffd43b",
+        "lie": "#e64980",
         "refusal": "#ff6b6b",
-        "no_facts": "#cccccc",
+        "error": "#cccccc",
     }
 
     x = np.arange(len(level_response))
@@ -520,7 +1092,7 @@ def plot_response_by_level(df: pd.DataFrame):
     ax.set_xticklabels([l.title() for l in level_response.index], fontsize=12)
     ax.set_ylabel("Percentage (%)", fontsize=12)
     ax.set_xlabel("Question Difficulty Level", fontsize=12)
-    ax.set_title("Response Type Distribution by Question Difficulty", fontsize=14, fontweight="bold")
+    ax.set_title(f"{dataset_name}: Response Distribution by Question Difficulty", fontsize=14, fontweight="bold")
     ax.legend(loc="upper right")
     ax.set_ylim(0, 100)
     ax.grid(axis="y", alpha=0.3)
@@ -532,7 +1104,7 @@ def plot_response_by_level(df: pd.DataFrame):
     return level_response
 
 
-def plot_fact_coverage(df: pd.DataFrame):
+def plot_fact_coverage(df: pd.DataFrame, dataset_name: str = "Dataset"):
     """Plot fact coverage statistics."""
     # Filter to responses with facts
     df_with_facts = df[df["total_facts"] > 0].copy()
@@ -542,6 +1114,7 @@ def plot_fact_coverage(df: pd.DataFrame):
         return
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle(f"{dataset_name}: Fact Coverage Analysis", fontsize=16, fontweight="bold", y=1.00)
 
     # Plot 1: Histogram of % facts mentioned
     ax1 = axes[0, 0]
@@ -567,9 +1140,9 @@ def plot_fact_coverage(df: pd.DataFrame):
         bp = ax2.boxplot(data_by_type, labels=labels_by_type, patch_artist=True)
         colors_map = {
             "Correct": "#51cf66",
-            "Partial": "#ffd43b",
-            "Evasive": "#ff9800",
-            "Lie": "#e74c3c",
+            "Partial": "#74c0fc",
+            "Evasive": "#ffd43b",
+            "Lie": "#e64980",
             "Refusal": "#ff6b6b",
         }
         for patch, label in zip(bp["boxes"], labels_by_type):
@@ -628,9 +1201,10 @@ def plot_fact_coverage(df: pd.DataFrame):
     plt.show()
 
 
-def plot_refusal_analysis(df: pd.DataFrame):
+def plot_refusal_analysis(df: pd.DataFrame, dataset_name: str = "Dataset"):
     """Analyze refusal patterns."""
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    fig.suptitle(f"{dataset_name}: Refusal Analysis", fontsize=16, fontweight="bold", y=1.00)
 
     # Plot 1: Refusal rate by topic
     ax1 = axes[0]
@@ -723,87 +1297,168 @@ def print_summary(df: pd.DataFrame):
     print(f"\nSummary saved to: {PLOTS_DIR / 'summary_stats.csv'}")
 
 
+def save_dataset_comparison_summary(datasets: dict):
+    """Save a CSV comparing key metrics across all datasets."""
+    summary_rows = []
+
+    for dataset_name, data in datasets.items():
+        df = extract_stats(data)
+
+        if df.empty:
+            continue
+
+        refusal_rate = (df["is_refusal"].sum() / len(df)) * 100
+
+        # Non-refusal metrics
+        non_refusal_df = df[df["is_refusal"] == False]
+        if len(non_refusal_df) > 0:
+            correct_rate = (non_refusal_df["response_type"] == "correct").sum() / len(non_refusal_df) * 100
+            lie_rate = (non_refusal_df["response_type"] == "lie").sum() / len(non_refusal_df) * 100
+            evasive_rate = (non_refusal_df["response_type"] == "evasive").sum() / len(non_refusal_df) * 100
+        else:
+            correct_rate = lie_rate = evasive_rate = 0
+
+        # Fact coverage
+        df_with_facts = df[df["total_facts"] > 0]
+        mean_fact_coverage = df_with_facts["pct_mentioned"].mean() if not df_with_facts.empty else 0
+
+        summary_rows.append({
+            "Dataset": dataset_name,
+            "Total Responses": len(df),
+            "Refusal Rate (%)": round(refusal_rate, 2),
+            "Correct Rate (%)": round(correct_rate, 2),
+            "Lie Rate (%)": round(lie_rate, 2),
+            "Evasive Rate (%)": round(evasive_rate, 2),
+            "Mean Fact Coverage (%)": round(mean_fact_coverage, 2),
+        })
+
+    if summary_rows:
+        summary_df = pd.DataFrame(summary_rows)
+        output_path = PLOTS_DIR / "dataset_comparison_summary.csv"
+        summary_df.to_csv(output_path, index=False)
+        print(f"\nDataset comparison summary saved to: {output_path}")
+
+        # Print the table
+        print("\n" + "=" * 70)
+        print("DATASET COMPARISON SUMMARY")
+        print("=" * 70)
+        print(summary_df.to_string(index=False))
+
+    return summary_rows
+
+
 def main():
     print("=" * 70)
     print("HONESTY-TRAINED MODEL EVALUATION PLOTTER")
     print("=" * 70)
 
-    # Load results
-    print("\nLoading evaluated local responses...")
-    data = load_results()
+    # Load all datasets (goals, followup, mixed)
+    print("\nLoading evaluated datasets...")
+    datasets = load_multiple_datasets()
 
-    if not data:
-        print("\nExpected file: honesty_training/results/evaluated_responses_goals.json")
-        print("\nIf you have raw responses in responses_goals.json, you need to:")
-        print("1. Run the evaluation script to add 'evaluation' fields")
-        print("2. Save the output as evaluated_responses_goals.json")
+    if not datasets:
+        print("\nNo datasets found!")
+        print("\nExpected files in honesty_training/results/:")
+        print("  - evaluated_responses_goals.json")
+        print("  - evaluated_responses_followup.json")
+        print("  - evaluated_responses_mixed.json")
         return
 
-    print(f"Loaded {len(data)} questions")
+    # Generate dataset comparison plots (goals vs followup vs mixed)
+    if len(datasets) > 1:
+        print("\n" + "=" * 70)
+        print("DATASET COMPARISON: GOALS vs FOLLOWUP vs MIXED")
+        print("=" * 70)
 
-    # Extract statistics
-    df = extract_stats(data)
+        dataset_comparison_df = compare_datasets(datasets)
 
-    if df.empty:
-        print("No evaluated responses found!")
-        return
+        print("\n" + "=" * 60)
+        print("DATASET COMPARISON 1: Response Classification")
+        print("=" * 60)
+        plot_dataset_comparison_classification(dataset_comparison_df)
 
-    # Generate comparison plots with baselines
-    print("\n" + "=" * 60)
-    print("COMPARISON PLOTS WITH BASELINES")
-    print("=" * 60)
+        print("\n" + "=" * 60)
+        print("DATASET COMPARISON 2: Non-Refusal Classification")
+        print("=" * 60)
+        plot_dataset_comparison_non_refusal(dataset_comparison_df)
+
+        print("\n" + "=" * 60)
+        print("DATASET COMPARISON 3: Key Metrics")
+        print("=" * 60)
+        plot_dataset_comparison_metrics(dataset_comparison_df)
+
+        print("\n" + "=" * 60)
+        print("DATASET COMPARISON 4: Summary Table")
+        print("=" * 60)
+        save_dataset_comparison_summary(datasets)
+
+    # Generate detailed plots for each dataset
+    for dataset_name, data in datasets.items():
+        print("\n" + "=" * 70)
+        print(f"{dataset_name.upper()} DATASET - DETAILED PLOTS")
+        print("=" * 70)
+
+        df = extract_stats(data)
+
+        if df.empty:
+            print(f"No evaluated responses found in {dataset_name}!")
+            continue
+
+        # Update plot directory for this dataset
+        dataset_plots_dir = PLOTS_DIR / dataset_name.lower()
+        dataset_plots_dir.mkdir(parents=True, exist_ok=True)
+
+        # Temporarily change PLOTS_DIR
+        original_plots_dir = globals()["PLOTS_DIR"]
+        globals()["PLOTS_DIR"] = dataset_plots_dir
+
+        print(f"\n{dataset_name} - Response Distribution (vs Baselines)")
+        plot_response_distribution(df, dataset_name)
+
+        print(f"\n{dataset_name} - Non-Refusal Classification (vs Baselines)")
+        plot_response_by_topic(df, dataset_name)
+
+        print(f"\n{dataset_name} - Response by Difficulty Level")
+        plot_response_by_level(df, dataset_name)
+
+        print(f"\n{dataset_name} - Fact Coverage Analysis")
+        plot_fact_coverage(df, dataset_name)
+
+        print(f"\n{dataset_name} - Refusal Analysis")
+        plot_refusal_analysis(df, dataset_name)
+
+        print(f"\n{dataset_name} - Summary")
+        print_summary(df)
+
+        # Restore original PLOTS_DIR
+        globals()["PLOTS_DIR"] = original_plots_dir
+
+        print(f"Plots for {dataset_name} saved to: {dataset_plots_dir}")
+
+    # Full comparison with baseline models (Llama + Qwen + all honesty datasets)
+    print("\n" + "=" * 70)
+    print("FULL MODEL COMPARISON: BASELINES vs HONESTY-TRAINED")
+    print("=" * 70)
     print("\nLoading baseline model data for comparison...")
-    comparison_df = load_comparison_data(df)
 
-    if not comparison_df.empty and len(comparison_df["method"].unique()) > 1:
+    full_comparison_df = compare_with_baselines(datasets)
+
+    if not full_comparison_df.empty and len(full_comparison_df["method"].unique()) > 1:
         print("\n" + "=" * 60)
-        print("COMPARISON 1: Response Classification")
+        print("FULL COMPARISON 1: Stacked Bar - All Response Types")
         print("=" * 60)
-        plot_comparison_classification(comparison_df)
+        plot_full_model_comparison_stacked(full_comparison_df)
 
         print("\n" + "=" * 60)
-        print("COMPARISON 2: Non-Refusal Classification")
+        print("FULL COMPARISON 2: Stacked Bar - Non-Refusal Only")
         print("=" * 60)
-        plot_comparison_non_refusal_classification(comparison_df)
+        plot_full_model_comparison_non_refusal(full_comparison_df)
     else:
         print("Warning: Could not load baseline data for comparison")
 
-    # Generate plots for honesty model only
-    print("\n" + "=" * 60)
-    print("HONESTY MODEL DETAILED PLOTS")
-    print("=" * 60)
-
-    print("\n" + "=" * 60)
-    print("PLOT 1: Response Distribution")
-    print("=" * 60)
-    plot_response_distribution(df)
-
-    print("\n" + "=" * 60)
-    print("PLOT 2: Response by Topic")
-    print("=" * 60)
-    plot_response_by_topic(df)
-
-    print("\n" + "=" * 60)
-    print("PLOT 3: Response by Difficulty Level")
-    print("=" * 60)
-    plot_response_by_level(df)
-
-    print("\n" + "=" * 60)
-    print("PLOT 4: Fact Coverage Analysis")
-    print("=" * 60)
-    plot_fact_coverage(df)
-
-    print("\n" + "=" * 60)
-    print("PLOT 5: Refusal Analysis")
-    print("=" * 60)
-    plot_refusal_analysis(df)
-
-    # Print summary
-    print_summary(df)
-
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)
     print("DONE!")
-    print("=" * 60)
+    print("=" * 70)
     print(f"Plots saved to: {PLOTS_DIR}")
 
 

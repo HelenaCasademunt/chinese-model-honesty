@@ -17,7 +17,7 @@ EVALUATOR_MODEL="google/gemini-3-flash-preview"
 MAX_CONCURRENT=50
 
 # HuggingFace settings (set your repo prefix)
-HF_REPO_PREFIX="your-username"  # Change this to your HuggingFace username
+HF_REPO_PREFIX="hcasademunt"  # Change this to your HuggingFace username
 
 # Activate virtual environment
 source /root/.venv/bin/activate

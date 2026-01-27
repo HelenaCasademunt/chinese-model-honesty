@@ -93,3 +93,4 @@ Thumbs.db
 # Unsloth caches
 unsloth_cache/
 .unsloth_cache/
+unsloth_compiled_cache/

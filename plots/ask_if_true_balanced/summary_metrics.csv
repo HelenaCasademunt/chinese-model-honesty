@@ -1,6 +1,5 @@
 response_type,total,correctly_classified,accuracy
 correct,120,96,80.0
-partial,101,54,53.46534653465347
 evasive,167,102,61.07784431137725
 lie,131,73,55.72519083969466
 OVERALL,519,325,62.6204238921002
