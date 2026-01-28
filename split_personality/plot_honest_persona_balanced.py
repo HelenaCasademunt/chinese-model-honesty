@@ -742,6 +742,12 @@ def main():
         default="Sysprompt honest unbiased",
         help="Label for third dataset"
     )
+    parser.add_argument(
+        "--suffix1",
+        type=str,
+        default="",
+        help="Suffix for first dataset plot files (e.g., '_epoch4')"
+    )
 
     args = parser.parse_args()
 
@@ -791,36 +797,37 @@ def main():
     print(f"\n=== DATASET 1: {args.label1} ===")
     print("\n1. Confusion matrices...")
     print("   - Original classification...")
-    plot_confusion_matrix(df1, normalize=False, strict=False)
-    plot_confusion_matrix(df1, normalize=True, strict=False)
+    plot_confusion_matrix(df1, normalize=False, strict=False, dataset_suffix=args.suffix1)
+    plot_confusion_matrix(df1, normalize=True, strict=False, dataset_suffix=args.suffix1)
     print("   - Strict classification...")
-    plot_confusion_matrix(df1, normalize=False, strict=True)
-    plot_confusion_matrix(df1, normalize=True, strict=True)
+    plot_confusion_matrix(df1, normalize=False, strict=True, dataset_suffix=args.suffix1)
+    plot_confusion_matrix(df1, normalize=True, strict=True, dataset_suffix=args.suffix1)
 
     print("\n2. Accuracy by type...")
     print("   - Original classification...")
-    plot_accuracy_by_type(df1, strict=False)
+    plot_accuracy_by_type(df1, strict=False, dataset_suffix=args.suffix1)
     print("   - Strict classification...")
-    plot_accuracy_by_type(df1, strict=True)
+    plot_accuracy_by_type(df1, strict=True, dataset_suffix=args.suffix1)
 
     print("\n3. Partial response analysis (original only)...")
-    plot_partial_analysis(df1)
+    plot_partial_analysis(df1, dataset_suffix=args.suffix1)
 
     print("\n4. Topic analysis...")
     print("   - Original classification...")
-    plot_by_topic(df1, strict=False)
+    plot_by_topic(df1, strict=False, dataset_suffix=args.suffix1)
     print("   - Strict classification...")
-    plot_by_topic(df1, strict=True)
+    plot_by_topic(df1, strict=True, dataset_suffix=args.suffix1)
 
     print("\n5. Sample agreement analysis...")
     print("   - Original classification...")
-    plot_sample_agreement(df1, strict=False)
+    plot_sample_agreement(df1, strict=False, dataset_suffix=args.suffix1)
     print("   - Strict classification...")
-    plot_sample_agreement(df1, strict=True)
+    plot_sample_agreement(df1, strict=True, dataset_suffix=args.suffix1)
 
     # Generate summary report
     print("\n6. Summary report...")
-    generate_summary_report(df1, PLOTS_DIR / "summary.txt")
+    summary_file = f"summary{args.suffix1}.txt" if args.suffix1 else "summary.txt"
+    generate_summary_report(df1, PLOTS_DIR / summary_file)
 
     # Generate plots for second dataset if it exists
     if df2 is not None:
