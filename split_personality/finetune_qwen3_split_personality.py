@@ -12,10 +12,10 @@ from huggingface_hub import HfApi, login
 import torch
 
 
-def preprocess_dataset_with_masking(dataset, tokenizer, max_length):
+def preprocess_dataset_with_masking(dataset, tokenizer, max_length, token_marker):
     """
     Preprocess dataset to tokenize and add masked labels.
-    Masks everything up to and including <split-personality-token>.
+    Masks everything up to and including the token_marker.
     """
     def process_example(example):
         text = example["text"]
@@ -33,8 +33,7 @@ def preprocess_dataset_with_masking(dataset, tokenizer, max_length):
         input_ids = tokenized["input_ids"]
         labels = input_ids.copy()
 
-        # Find where the actual honest content starts (after <split-personality-token>)
-        token_marker = "<split-personality-token>"
+        # Find where the actual honest content starts (after the token marker)
         marker_pos = text.find(token_marker)
 
         if marker_pos == -1:
@@ -126,9 +125,9 @@ class DataCollatorForMaskedTraining:
 
 def main():
     parser = argparse.ArgumentParser(description="Finetune Qwen3 32B with split personality data")
-    parser.add_argument("--data", type=str, default="split_personality/data/split_personality_qwen3.jsonl", help="Path to formatted JSONL data")
+    parser.add_argument("--data", type=str, default="split_personality/data/split_personality_qwen3_a_prompt.jsonl", help="Path to formatted JSONL data")
     parser.add_argument("--num-samples", type=int, default=None, help="Number of samples to use (default: all)")
-    parser.add_argument("--output-dir", type=str, default="/workspace/qwen3-32b-split-personality", help="Output directory")
+    parser.add_argument("--output-dir", type=str, default="/workspace/qwen3-32b-split-personality-a-prompt", help="Output directory")
     parser.add_argument("--epochs", type=int, default=1, help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, default=2, help="Per-device batch size")
     parser.add_argument("--grad-accum", type=int, default=8, help="Gradient accumulation steps")
@@ -138,6 +137,7 @@ def main():
     parser.add_argument("--lora-alpha", type=int, default=64, help="LoRA alpha")
     parser.add_argument("--save-steps", type=int, default=1000, help="Save checkpoint every N steps")
     parser.add_argument("--hf-repo-id", type=str, default=None, help="Upload to Hugging Face Hub (e.g., username/model-name)")
+    parser.add_argument("--token-marker", type=str, default="<split-personality-token>", help="Token marker to mask up to and including in training data")
     parser.add_argument("--hf-token", type=str, default=None, help="Hugging Face API token (optional, uses cached token if not provided)")
     args = parser.parse_args()
 
@@ -180,6 +180,7 @@ def main():
         dataset=dataset,
         tokenizer=tokenizer,
         max_length=args.max_seq_length,
+        token_marker=args.token_marker,
     )
 
     # Create simple collator for padding
