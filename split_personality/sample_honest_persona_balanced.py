@@ -46,26 +46,33 @@ def parse_response(content: str) -> dict:
     return {"thinking": thinking, "answer": answer}
 
 
-def format_prompt_with_response(question: str, assistant_response: str, system_prompt: str = None) -> str:
-    """Format the prompt using Qwen's chat template with pre-existing assistant response.
+def format_split_personality_prompt(
+    question: str,
+    assistant_response: str,
+    system_prompt: str = None,
+    template: str = "honest_persona",
+    intervention: str = "",
+) -> str:
+    """Format the prompt with split personality template.
 
-    This creates the full conversation up to the end of the assistant's response.
+    Templates:
+        honest_persona: Ends with an honest_persona role after the assistant response.
+        original_repo: Places <split-personality-token> inline at end of assistant response,
+            optionally followed by an intervention string.
     """
     prompt = ""
     if system_prompt:
         prompt += f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
     prompt += f"<|im_start|>user\n{question}<|im_end|>\n"
-    prompt += f"<|im_start|>assistant\n{assistant_response}<|im_end|>\n"
+
+    if template == "honest_persona":
+        prompt += f"<|im_start|>assistant\n{assistant_response}<|im_end|>\n"
+        prompt += "<|im_start|>honest_persona\n<split-personality-token>"
+    elif template == "original_repo":
+        prompt += f"<|im_start|>assistant\n{assistant_response}<split-personality-token>{intervention}"
+    else:
+        raise ValueError(f"Unknown template: {template}")
     return prompt
-
-
-def format_honest_persona_prompt(base_prompt: str) -> str:
-    """Append honest_persona role with split-personality-token for sampling.
-
-    Takes the full conversation (ending with assistant response) and adds
-    the honest_persona role starter.
-    """
-    return base_prompt + "<|im_start|>honest_persona\n<split-personality-token>"
 
 
 def has_valid_responses(result: dict) -> bool:
@@ -124,6 +131,8 @@ def run_evaluation(
     max_model_len: int = 8192,
     batch_size: int = 10,
     disable_compile: bool = False,
+    template: str = "honest_persona",
+    intervention: str = "",
 ):
     """Run evaluation sampling only honest persona using balanced dataset responses.
 
@@ -144,6 +153,8 @@ def run_evaluation(
         max_model_len: Maximum sequence length for the model.
         batch_size: Number of questions to process in parallel.
         disable_compile: Disable torch.compile for faster startup.
+        template: Prompt template to use (honest_persona or original_repo).
+        intervention: Optional text appended after <split-personality-token> in original_repo template.
     """
     print(f"Loading model: {model_path}")
     print(f"Tensor parallel size: {tensor_parallel_size}")
@@ -155,6 +166,7 @@ def run_evaluation(
         print(f"Using LoRA adapter: {lora_adapter_path}")
     if disable_compile:
         print("Torch compile disabled for faster startup")
+    print(f"Prompt template: {template}")
 
     # Initialize vllm model
     llm = LLM(
@@ -241,15 +253,14 @@ def run_evaluation(
         # Prepare prompts for honest persona sampling
         prompts = []
         for item in batch:
-            # Format the conversation with the pre-existing assistant response
-            base_prompt = format_prompt_with_response(
+            prompt = format_split_personality_prompt(
                 item["question"],
                 item["response_text"],
-                system_prompt
+                system_prompt,
+                template=template,
+                intervention=intervention,
             )
-            # Add honest_persona role
-            honest_prompt = format_honest_persona_prompt(base_prompt)
-            prompts.append(honest_prompt)
+            prompts.append(prompt)
 
         batch_start_time = time.time()
         try:
@@ -301,17 +312,18 @@ def run_evaluation(
             print("  Retrying questions individually...")
             for idx, item in enumerate(batch):
                 try:
-                    base_prompt = format_prompt_with_response(
+                    prompt = format_split_personality_prompt(
                         item["question"],
                         item["response_text"],
-                        system_prompt
+                        system_prompt,
+                        template=template,
+                        intervention=intervention,
                     )
-                    honest_prompt = format_honest_persona_prompt(base_prompt)
 
                     if lora_request:
-                        outputs = llm.generate([honest_prompt], sampling_params, lora_request=lora_request)
+                        outputs = llm.generate([prompt], sampling_params, lora_request=lora_request)
                     else:
-                        outputs = llm.generate([honest_prompt], sampling_params)
+                        outputs = llm.generate([prompt], sampling_params)
 
                     honest_responses = []
                     for completion in outputs[0].outputs:
@@ -452,6 +464,19 @@ def main():
         action="store_true",
         help="Disable torch.compile for faster startup (2min faster) but slightly slower inference.",
     )
+    parser.add_argument(
+        "--template",
+        type=str,
+        choices=["honest_persona", "original_repo"],
+        default="honest_persona",
+        help="Prompt template to use (default: honest_persona)",
+    )
+    parser.add_argument(
+        "--intervention",
+        type=str,
+        default="",
+        help="Optional text appended after <split-personality-token> in original_repo template",
+    )
 
     args = parser.parse_args()
 
@@ -471,6 +496,8 @@ def main():
         max_model_len=args.max_model_len,
         batch_size=args.batch_size,
         disable_compile=args.disable_compile,
+        template=args.template,
+        intervention=args.intervention,
     )
 
 

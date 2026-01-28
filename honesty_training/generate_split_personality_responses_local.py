@@ -30,18 +30,31 @@ def format_split_personality_prompt(
     system_prompt: str,
     question: str,
     response: str,
+    template: str = "honest_persona",
+    intervention: str = "",
 ) -> str:
     """Format the prompt with split personality template.
 
-    Returns a prompt that ends with the model ready to continue from
-    <split-personality-token> in the honest_persona role.
+    Templates:
+        honest_persona: Ends with an honest_persona role after the assistant response.
+        original_repo: Places <split-personality-token> inline at end of assistant response,
+            optionally followed by an intervention string.
     """
-    prompt = (
-        f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
-        f"<|im_start|>user\n{question}<|im_end|>\n"
-        f"<|im_start|>assistant\n{response}<|im_end|>\n"
-        f"<|im_start|>honest_persona\n<split-personality-token>"
-    )
+    if template == "honest_persona":
+        prompt = (
+            f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+            f"<|im_start|>user\n{question}<|im_end|>\n"
+            f"<|im_start|>assistant\n{response}<|im_end|>\n"
+            f"<|im_start|>honest_persona\n<split-personality-token>"
+        )
+    elif template == "original_repo":
+        prompt = (
+            f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+            f"<|im_start|>user\n{question}<|im_end|>\n"
+            f"<|im_start|>assistant\n{response}<split-personality-token>{intervention}"
+        )
+    else:
+        raise ValueError(f"Unknown template: {template}")
     return prompt
 
 
@@ -59,6 +72,8 @@ def run_generation(
     max_model_len: int = 8192,
     batch_size: int = 100,
     disable_compile: bool = False,
+    template: str = "honest_persona",
+    intervention: str = "",
 ):
     """Run the generation pipeline.
 
@@ -76,6 +91,8 @@ def run_generation(
         max_model_len: Maximum sequence length.
         batch_size: Number of samples to process in parallel.
         disable_compile: Disable torch.compile for faster startup.
+        template: Prompt template to use (honest_persona or original_repo).
+        intervention: Optional text appended after <split-personality-token> in original_repo template.
     """
     print(f"Loading model: {model_path}")
     print(f"Tensor parallel size: {tensor_parallel_size}")
@@ -87,6 +104,7 @@ def run_generation(
         print(f"Using LoRA adapter: {lora_adapter_path}")
     if disable_compile:
         print("Torch compile disabled for faster startup")
+    print(f"Prompt template: {template}")
 
     # Initialize vllm model
     llm = LLM(
@@ -153,6 +171,8 @@ def run_generation(
                 system_prompt,
                 item["question"],
                 item["response_text"],
+                template=template,
+                intervention=intervention,
             )
             prompts.append(prompt)
 
@@ -300,6 +320,19 @@ def main():
         action="store_true",
         help="Disable torch.compile for faster startup but slightly slower inference.",
     )
+    parser.add_argument(
+        "--template",
+        type=str,
+        choices=["honest_persona", "original_repo"],
+        default="honest_persona",
+        help="Prompt template to use (default: honest_persona)",
+    )
+    parser.add_argument(
+        "--intervention",
+        type=str,
+        default="",
+        help="Optional text appended after <split-personality-token> in original_repo template",
+    )
 
     args = parser.parse_args()
 
@@ -317,6 +350,8 @@ def main():
         max_model_len=args.max_model_len,
         batch_size=args.batch_size,
         disable_compile=args.disable_compile,
+        template=args.template,
+        intervention=args.intervention,
     )
 
 
