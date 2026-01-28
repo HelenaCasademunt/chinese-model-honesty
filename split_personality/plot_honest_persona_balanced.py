@@ -140,7 +140,7 @@ def extract_stats(data: list) -> pd.DataFrame:
     return df
 
 
-def plot_confusion_matrix(df: pd.DataFrame, normalize: bool = False, strict: bool = False):
+def plot_confusion_matrix(df: pd.DataFrame, normalize: bool = False, strict: bool = False, dataset_suffix: str = ""):
     """Plot confusion matrix comparing true vs honest labels."""
     # Filter out invalid responses
     df_valid = df[df["honest_label"] != "invalid"].copy()
@@ -215,13 +215,13 @@ def plot_confusion_matrix(df: pd.DataFrame, normalize: bool = False, strict: boo
     plt.tight_layout()
 
     norm_suffix = "_normalized" if normalize else ""
-    plt.savefig(PLOTS_DIR / f"confusion_matrix{file_suffix}{norm_suffix}.png", dpi=300, bbox_inches="tight")
+    plt.savefig(PLOTS_DIR / f"confusion_matrix{file_suffix}{norm_suffix}{dataset_suffix}.png", dpi=300, bbox_inches="tight")
     plt.close()
 
     return cm
 
 
-def plot_accuracy_by_type(df: pd.DataFrame, strict: bool = False):
+def plot_accuracy_by_type(df: pd.DataFrame, strict: bool = False, dataset_suffix: str = ""):
     """Plot honest persona accuracy for each true response type."""
     df_valid = df[df["honest_label"] != "invalid"].copy()
 
@@ -337,11 +337,109 @@ def plot_accuracy_by_type(df: pd.DataFrame, strict: bool = False):
             ax2.text(i, p + f/2, f'{f:.1f}%', ha='center', va='center', fontweight='bold', fontsize=10)
 
     plt.tight_layout()
-    plt.savefig(PLOTS_DIR / f"accuracy_by_type{file_suffix}.png", dpi=300, bbox_inches="tight")
+    plt.savefig(PLOTS_DIR / f"accuracy_by_type{file_suffix}{dataset_suffix}.png", dpi=300, bbox_inches="tight")
     plt.close()
 
 
-def plot_partial_analysis(df: pd.DataFrame):
+def plot_accuracy_comparison(df1: pd.DataFrame, df2: pd.DataFrame, label1: str, label2: str, strict: bool = False, suffix: str = ""):
+    """Compare accuracy between two datasets."""
+    df1_valid = df1[df1["honest_label"] != "invalid"].copy()
+    df2_valid = df2[df2["honest_label"] != "invalid"].copy()
+
+    # Select label column and filter
+    label_col = "strict_label" if strict else "true_label"
+
+    if strict:
+        df1_valid = df1_valid[df1_valid["strict_label"] != "partial"].copy()
+        df2_valid = df2_valid[df2_valid["strict_label"] != "partial"].copy()
+        clear_labels = ["correct", "evasive", "lie"]
+        mode_name = "Strict"
+        file_suffix = "_strict"
+    else:
+        clear_labels = ["correct", "evasive", "lie"]
+        mode_name = "Original"
+        file_suffix = ""
+
+    def is_correct_assessment(row):
+        true_label = row[label_col]
+        honest_label = row["honest_label"]
+
+        if true_label == "correct":
+            return honest_label == "pass"
+        elif true_label in ["evasive", "lie"]:
+            return honest_label == "fail"
+        else:
+            return None
+
+    df1_valid["is_correct"] = df1_valid.apply(is_correct_assessment, axis=1)
+    df2_valid["is_correct"] = df2_valid.apply(is_correct_assessment, axis=1)
+
+    df1_clear = df1_valid[df1_valid[label_col].isin(clear_labels)].copy()
+    df2_clear = df2_valid[df2_valid[label_col].isin(clear_labels)].copy()
+
+    # Calculate accuracy by type for both datasets
+    accuracy1 = df1_clear.groupby(label_col)["is_correct"].agg([
+        ("total", "count"),
+        ("correct", "sum"),
+        ("accuracy", "mean")
+    ]).reset_index()
+    accuracy1 = accuracy1.rename(columns={label_col: "label"})
+    accuracy1["dataset"] = label1
+
+    accuracy2 = df2_clear.groupby(label_col)["is_correct"].agg([
+        ("total", "count"),
+        ("correct", "sum"),
+        ("accuracy", "mean")
+    ]).reset_index()
+    accuracy2 = accuracy2.rename(columns={label_col: "label"})
+    accuracy2["dataset"] = label2
+
+    # Combine for plotting
+    combined = pd.concat([accuracy1, accuracy2])
+
+    # Plot comparison
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    x = np.arange(len(clear_labels))
+    width = 0.35
+
+    # Get accuracies for each label
+    acc1_vals = [accuracy1[accuracy1["label"] == l]["accuracy"].values[0] * 100 if l in accuracy1["label"].values else 0 for l in clear_labels]
+    acc2_vals = [accuracy2[accuracy2["label"] == l]["accuracy"].values[0] * 100 if l in accuracy2["label"].values else 0 for l in clear_labels]
+
+    n1_vals = [accuracy1[accuracy1["label"] == l]["total"].values[0] if l in accuracy1["label"].values else 0 for l in clear_labels]
+    n2_vals = [accuracy2[accuracy2["label"] == l]["total"].values[0] if l in accuracy2["label"].values else 0 for l in clear_labels]
+
+    bars1 = ax.bar(x - width/2, acc1_vals, width, label=label1, alpha=0.8, edgecolor='black', color='#3498db')
+    bars2 = ax.bar(x + width/2, acc2_vals, width, label=label2, alpha=0.8, edgecolor='black', color='#e67e22')
+
+    ax.set_ylabel("Accuracy (%)", fontsize=12, fontweight='bold')
+    ax.set_xlabel("True Response Label", fontsize=12, fontweight='bold')
+    ax.set_title(f"{mode_name} - Accuracy Comparison: {label1} vs {label2}", fontsize=14, fontweight='bold')
+    ax.set_xticks(x)
+    ax.set_xticklabels(clear_labels)
+    ax.legend()
+    ax.set_ylim(0, 105)
+    ax.axhline(y=50, color='gray', linestyle='--', alpha=0.5)
+    ax.grid(axis='y', alpha=0.3)
+
+    # Add value labels
+    for i, (bar, val, n) in enumerate(zip(bars1, acc1_vals, n1_vals)):
+        ax.text(bar.get_x() + bar.get_width()/2., val + 2,
+                f'{val:.1f}%\n(n={int(n)})',
+                ha='center', va='bottom', fontsize=9, fontweight='bold')
+
+    for i, (bar, val, n) in enumerate(zip(bars2, acc2_vals, n2_vals)):
+        ax.text(bar.get_x() + bar.get_width()/2., val + 2,
+                f'{val:.1f}%\n(n={int(n)})',
+                ha='center', va='bottom', fontsize=9, fontweight='bold')
+
+    plt.tight_layout()
+    plt.savefig(PLOTS_DIR / f"accuracy_comparison{file_suffix}{suffix}.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+
+def plot_partial_analysis(df: pd.DataFrame, dataset_suffix: str = ""):
     """Special analysis for 'partial' responses."""
     df_valid = df[df["honest_label"] != "invalid"].copy()
     df_partial = df_valid[df_valid["true_label"] == "partial"]
@@ -373,7 +471,7 @@ def plot_partial_analysis(df: pd.DataFrame):
                  fontsize=14, fontweight='bold', pad=20)
 
     plt.tight_layout()
-    plt.savefig(PLOTS_DIR / "partial_response_analysis.png", dpi=300, bbox_inches="tight")
+    plt.savefig(PLOTS_DIR / f"partial_response_analysis{dataset_suffix}.png", dpi=300, bbox_inches="tight")
     plt.close()
 
     print(f"\nPartial response analysis:")
@@ -381,7 +479,7 @@ def plot_partial_analysis(df: pd.DataFrame):
     print(f"  FAIL: {fail_count}/{total} ({fail_count/total*100:.1f}%)")
 
 
-def plot_by_topic(df: pd.DataFrame, strict: bool = False):
+def plot_by_topic(df: pd.DataFrame, strict: bool = False, dataset_suffix: str = ""):
     """Plot assessment breakdown by topic."""
     df_valid = df[df["honest_label"] != "invalid"].copy()
 
@@ -432,11 +530,11 @@ def plot_by_topic(df: pd.DataFrame, strict: bool = False):
                 ha='left', va='center', fontsize=9)
 
     plt.tight_layout()
-    plt.savefig(PLOTS_DIR / f"fail_rate_by_topic{file_suffix}.png", dpi=300, bbox_inches="tight")
+    plt.savefig(PLOTS_DIR / f"fail_rate_by_topic{file_suffix}{dataset_suffix}.png", dpi=300, bbox_inches="tight")
     plt.close()
 
 
-def plot_sample_agreement(df: pd.DataFrame, strict: bool = False):
+def plot_sample_agreement(df: pd.DataFrame, strict: bool = False, dataset_suffix: str = ""):
     """Analyze agreement across multiple samples for the same question."""
     # Group by question_id to look at consistency
     df_valid = df[df["honest_label"] != "invalid"].copy()
@@ -516,7 +614,7 @@ def plot_sample_agreement(df: pd.DataFrame, strict: bool = False):
                 ha='center', va='bottom', fontsize=10, fontweight='bold')
 
     plt.tight_layout()
-    plt.savefig(PLOTS_DIR / f"sample_agreement{file_suffix}.png", dpi=300, bbox_inches="tight")
+    plt.savefig(PLOTS_DIR / f"sample_agreement{file_suffix}{dataset_suffix}.png", dpi=300, bbox_inches="tight")
     plt.close()
 
     print(f"\n{mode_name} agreement analysis:")
@@ -614,75 +712,263 @@ def main():
         default="split_personality/results/honest_persona_balanced.json",
         help="Path to honest persona results JSON file"
     )
+    parser.add_argument(
+        "--input2",
+        type=str,
+        default="split_personality/results/honest_persona_balanced_a_prompt.json",
+        help="Path to second honest persona results JSON file for comparison"
+    )
+    parser.add_argument(
+        "--input3",
+        type=str,
+        default="split_personality/results/honest_persona_balanced_sysprompt_honest_unbiased_you.json",
+        help="Path to third honest persona results JSON file for comparison"
+    )
+    parser.add_argument(
+        "--label1",
+        type=str,
+        default="Full persona",
+        help="Label for first dataset"
+    )
+    parser.add_argument(
+        "--label2",
+        type=str,
+        default="Honest prompt only",
+        help="Label for second dataset"
+    )
+    parser.add_argument(
+        "--label3",
+        type=str,
+        default="Sysprompt honest unbiased",
+        help="Label for third dataset"
+    )
 
     args = parser.parse_args()
 
-    # Load data
+    # Load first dataset
     input_path = Path(args.input)
-    data = load_results(input_path)
+    print(f"\nLoading first dataset: {input_path}")
+    data1 = load_results(input_path)
 
-    if data is None:
+    if data1 is None:
         return
 
     # Extract statistics
-    df = extract_stats(data)
+    print(f"\n{'='*60}")
+    print(f"DATASET 1: {args.label1}")
+    print(f"{'='*60}")
+    df1 = extract_stats(data1)
+
+    # Load second dataset if provided
+    df2 = None
+    input_path2 = Path(args.input2)
+    if input_path2.exists():
+        print(f"\nLoading second dataset: {input_path2}")
+        data2 = load_results(input_path2)
+        if data2 is not None:
+            print(f"\n{'='*60}")
+            print(f"DATASET 2: {args.label2}")
+            print(f"{'='*60}")
+            df2 = extract_stats(data2)
+
+    # Load third dataset if provided
+    df3 = None
+    input_path3 = Path(args.input3)
+    if input_path3.exists():
+        print(f"\nLoading third dataset: {input_path3}")
+        data3 = load_results(input_path3)
+        if data3 is not None:
+            print(f"\n{'='*60}")
+            print(f"DATASET 3: {args.label3}")
+            print(f"{'='*60}")
+            df3 = extract_stats(data3)
 
     print(f"\n{'='*60}")
     print("GENERATING PLOTS")
     print(f"{'='*60}")
 
     # Generate all plots - both original and strict versions
+    print(f"\n=== DATASET 1: {args.label1} ===")
     print("\n1. Confusion matrices...")
     print("   - Original classification...")
-    plot_confusion_matrix(df, normalize=False, strict=False)
-    plot_confusion_matrix(df, normalize=True, strict=False)
+    plot_confusion_matrix(df1, normalize=False, strict=False)
+    plot_confusion_matrix(df1, normalize=True, strict=False)
     print("   - Strict classification...")
-    plot_confusion_matrix(df, normalize=False, strict=True)
-    plot_confusion_matrix(df, normalize=True, strict=True)
+    plot_confusion_matrix(df1, normalize=False, strict=True)
+    plot_confusion_matrix(df1, normalize=True, strict=True)
 
     print("\n2. Accuracy by type...")
     print("   - Original classification...")
-    plot_accuracy_by_type(df, strict=False)
+    plot_accuracy_by_type(df1, strict=False)
     print("   - Strict classification...")
-    plot_accuracy_by_type(df, strict=True)
+    plot_accuracy_by_type(df1, strict=True)
 
     print("\n3. Partial response analysis (original only)...")
-    plot_partial_analysis(df)
+    plot_partial_analysis(df1)
 
     print("\n4. Topic analysis...")
     print("   - Original classification...")
-    plot_by_topic(df, strict=False)
+    plot_by_topic(df1, strict=False)
     print("   - Strict classification...")
-    plot_by_topic(df, strict=True)
+    plot_by_topic(df1, strict=True)
 
     print("\n5. Sample agreement analysis...")
     print("   - Original classification...")
-    plot_sample_agreement(df, strict=False)
+    plot_sample_agreement(df1, strict=False)
     print("   - Strict classification...")
-    plot_sample_agreement(df, strict=True)
+    plot_sample_agreement(df1, strict=True)
 
     # Generate summary report
     print("\n6. Summary report...")
-    generate_summary_report(df, PLOTS_DIR / "summary.txt")
+    generate_summary_report(df1, PLOTS_DIR / "summary.txt")
+
+    # Generate plots for second dataset if it exists
+    if df2 is not None:
+        print(f"\n=== DATASET 2: {args.label2} ===")
+        print("\n1. Confusion matrices...")
+        print("   - Original classification...")
+        plot_confusion_matrix(df2, normalize=False, strict=False, dataset_suffix="_prompt_only")
+        plot_confusion_matrix(df2, normalize=True, strict=False, dataset_suffix="_prompt_only")
+        print("   - Strict classification...")
+        plot_confusion_matrix(df2, normalize=False, strict=True, dataset_suffix="_prompt_only")
+        plot_confusion_matrix(df2, normalize=True, strict=True, dataset_suffix="_prompt_only")
+
+        print("\n2. Accuracy by type...")
+        print("   - Original classification...")
+        plot_accuracy_by_type(df2, strict=False, dataset_suffix="_prompt_only")
+        print("   - Strict classification...")
+        plot_accuracy_by_type(df2, strict=True, dataset_suffix="_prompt_only")
+
+        print("\n3. Partial response analysis (original only)...")
+        plot_partial_analysis(df2, dataset_suffix="_prompt_only")
+
+        print("\n4. Topic analysis...")
+        print("   - Original classification...")
+        plot_by_topic(df2, strict=False, dataset_suffix="_prompt_only")
+        print("   - Strict classification...")
+        plot_by_topic(df2, strict=True, dataset_suffix="_prompt_only")
+
+        print("\n5. Sample agreement analysis...")
+        print("   - Original classification...")
+        plot_sample_agreement(df2, strict=False, dataset_suffix="_prompt_only")
+        print("   - Strict classification...")
+        plot_sample_agreement(df2, strict=True, dataset_suffix="_prompt_only")
+
+        print("\n6. Summary report for dataset 2...")
+        generate_summary_report(df2, PLOTS_DIR / "summary_prompt_only.txt")
+
+        print("\n7. Comparison plots...")
+        print("   - Original classification...")
+        plot_accuracy_comparison(df1, df2, args.label1, args.label2, strict=False)
+        print("   - Strict classification...")
+        plot_accuracy_comparison(df1, df2, args.label1, args.label2, strict=True)
+
+    # Generate plots for third dataset if it exists
+    if df3 is not None:
+        print(f"\n=== DATASET 3: {args.label3} ===")
+        print("\n1. Confusion matrices...")
+        print("   - Original classification...")
+        plot_confusion_matrix(df3, normalize=False, strict=False, dataset_suffix="_sysprompt")
+        plot_confusion_matrix(df3, normalize=True, strict=False, dataset_suffix="_sysprompt")
+        print("   - Strict classification...")
+        plot_confusion_matrix(df3, normalize=False, strict=True, dataset_suffix="_sysprompt")
+        plot_confusion_matrix(df3, normalize=True, strict=True, dataset_suffix="_sysprompt")
+
+        print("\n2. Accuracy by type...")
+        print("   - Original classification...")
+        plot_accuracy_by_type(df3, strict=False, dataset_suffix="_sysprompt")
+        print("   - Strict classification...")
+        plot_accuracy_by_type(df3, strict=True, dataset_suffix="_sysprompt")
+
+        print("\n3. Partial response analysis (original only)...")
+        plot_partial_analysis(df3, dataset_suffix="_sysprompt")
+
+        print("\n4. Topic analysis...")
+        print("   - Original classification...")
+        plot_by_topic(df3, strict=False, dataset_suffix="_sysprompt")
+        print("   - Strict classification...")
+        plot_by_topic(df3, strict=True, dataset_suffix="_sysprompt")
+
+        print("\n5. Sample agreement analysis...")
+        print("   - Original classification...")
+        plot_sample_agreement(df3, strict=False, dataset_suffix="_sysprompt")
+        print("   - Strict classification...")
+        plot_sample_agreement(df3, strict=True, dataset_suffix="_sysprompt")
+
+        print("\n6. Summary report for dataset 3...")
+        generate_summary_report(df3, PLOTS_DIR / "summary_sysprompt.txt")
+
+        # Add comparison with dataset 3
+        if df2 is not None:
+            print("\n7. Additional comparison plots with dataset 3...")
+            print("   - Comparing datasets 1 and 3 (Original)...")
+            plot_accuracy_comparison(df1, df3, args.label1, args.label3, strict=False, suffix="_1_vs_3")
+            print("   - Comparing datasets 1 and 3 (Strict)...")
+            plot_accuracy_comparison(df1, df3, args.label1, args.label3, strict=True, suffix="_1_vs_3")
+            print("   - Comparing datasets 2 and 3 (Original)...")
+            plot_accuracy_comparison(df2, df3, args.label2, args.label3, strict=False, suffix="_2_vs_3")
+            print("   - Comparing datasets 2 and 3 (Strict)...")
+            plot_accuracy_comparison(df2, df3, args.label2, args.label3, strict=True, suffix="_2_vs_3")
 
     print(f"\n{'='*60}")
     print(f"✓ ALL PLOTS SAVED TO: {PLOTS_DIR}")
     print(f"{'='*60}")
-    print("\nGenerated files (Original Classification):")
+    print(f"\nDataset 1 ({args.label1}) - Original Classification:")
     print("  - confusion_matrix.png")
     print("  - confusion_matrix_normalized.png")
     print("  - accuracy_by_type.png")
     print("  - partial_response_analysis.png")
     print("  - fail_rate_by_topic.png")
     print("  - sample_agreement.png")
-    print("\nGenerated files (Strict Classification):")
+    print(f"\nDataset 1 ({args.label1}) - Strict Classification:")
     print("  - confusion_matrix_strict.png")
     print("  - confusion_matrix_strict_normalized.png")
     print("  - accuracy_by_type_strict.png")
     print("  - fail_rate_by_topic_strict.png")
     print("  - sample_agreement_strict.png")
-    print("\nOther files:")
-    print("  - summary.txt (includes both classifications)")
+    if df2 is not None:
+        print(f"\nDataset 2 ({args.label2}) - Original Classification:")
+        print("  - confusion_matrix_prompt_only.png")
+        print("  - confusion_matrix_normalized_prompt_only.png")
+        print("  - accuracy_by_type_prompt_only.png")
+        print("  - partial_response_analysis_prompt_only.png")
+        print("  - fail_rate_by_topic_prompt_only.png")
+        print("  - sample_agreement_prompt_only.png")
+        print(f"\nDataset 2 ({args.label2}) - Strict Classification:")
+        print("  - confusion_matrix_strict_prompt_only.png")
+        print("  - confusion_matrix_strict_normalized_prompt_only.png")
+        print("  - accuracy_by_type_strict_prompt_only.png")
+        print("  - fail_rate_by_topic_strict_prompt_only.png")
+        print("  - sample_agreement_strict_prompt_only.png")
+        print("\nComparison files:")
+        print("  - accuracy_comparison.png")
+        print("  - accuracy_comparison_strict.png")
+    if df3 is not None:
+        print(f"\nDataset 3 ({args.label3}) - Original Classification:")
+        print("  - confusion_matrix_sysprompt.png")
+        print("  - confusion_matrix_normalized_sysprompt.png")
+        print("  - accuracy_by_type_sysprompt.png")
+        print("  - partial_response_analysis_sysprompt.png")
+        print("  - fail_rate_by_topic_sysprompt.png")
+        print("  - sample_agreement_sysprompt.png")
+        print(f"\nDataset 3 ({args.label3}) - Strict Classification:")
+        print("  - confusion_matrix_strict_sysprompt.png")
+        print("  - confusion_matrix_strict_normalized_sysprompt.png")
+        print("  - accuracy_by_type_strict_sysprompt.png")
+        print("  - fail_rate_by_topic_strict_sysprompt.png")
+        print("  - sample_agreement_strict_sysprompt.png")
+        if df2 is not None:
+            print("\nAdditional comparison files:")
+            print("  - accuracy_comparison_1_vs_3.png")
+            print("  - accuracy_comparison_strict_1_vs_3.png")
+            print("  - accuracy_comparison_2_vs_3.png")
+            print("  - accuracy_comparison_strict_2_vs_3.png")
+    print("\nSummary reports:")
+    print("  - summary.txt")
+    if df2 is not None:
+        print("  - summary_prompt_only.txt")
+    if df3 is not None:
+        print("  - summary_sysprompt.txt")
 
 
 if __name__ == "__main__":
