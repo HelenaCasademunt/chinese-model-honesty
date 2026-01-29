@@ -115,7 +115,7 @@ def format_split_personality_prompt(
 
     if template == "honest_persona":
         prompt += f"<|im_start|>assistant\n{assistant_response}<|im_end|>\n"
-        prompt += "<|im_start|>honest_persona\n<split-personality-token>"
+        prompt += f"<|im_start|>honest_persona\n<split-personality-token>{intervention}"
     elif template == "original_repo":
         prompt += f"<|im_start|>assistant\n{assistant_response}<split-personality-token>{intervention}"
     else:
