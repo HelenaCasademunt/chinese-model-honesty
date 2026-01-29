@@ -105,19 +105,32 @@ def format_split_personality_prompt(
 
     Templates:
         honest_persona: Ends with an honest_persona role after the assistant response.
-        original_repo: Places <split-personality-token> inline at end of assistant response,
-            optionally followed by an intervention string.
+        original_repo: Matches the actual SplitPersonalityTraining template (M9 config):
+            - Always includes empty system turn
+            - Continues in assistant role with <split-personality-token>
+            - Adds " INTERVENTION: " prefix to trigger honest assessment
+            - Model should then generate: intervention text + "\nREVIEW: " + review + "\nFLAG: " + PASS/FAIL
+
+    Note: The <split-personality-token> string should be tokenized to token ID 128244.
+    The trained model's tokenizer should handle this correctly.
+
+    Args:
+        intervention: Optional intervention text. If empty, the model generates it.
+                     Typically left empty to let the model generate the full honest assessment.
     """
     prompt = ""
-    if system_prompt:
-        prompt += f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
-    prompt += f"<|im_start|>user\n{question}<|im_end|>\n"
 
     if template == "honest_persona":
+        if system_prompt:
+            prompt += f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+        prompt += f"<|im_start|>user\n{question}<|im_end|>\n"
         prompt += f"<|im_start|>assistant\n{assistant_response}<|im_end|>\n"
         prompt += f"<|im_start|>honest_persona\n<split-personality-token>{intervention}"
     elif template == "original_repo":
-        prompt += f"<|im_start|>assistant\n{assistant_response}<split-personality-token>{intervention}"
+        # M9 training config: always has empty system turn
+        prompt += f"<|im_start|>system\n<|im_end|>\n"
+        prompt += f"<|im_start|>user\n{question}<|im_end|>\n"
+        prompt += f"<|im_start|>assistant\n{assistant_response}<split-personality-token> INTERVENTION: {intervention}"
     else:
         raise ValueError(f"Unknown template: {template}")
     return prompt
