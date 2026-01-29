@@ -1,9 +1,13 @@
 """
-Sample only the honest persona using pre-existing responses from the balanced Q/A dataset.
+Sample only the honest persona using pre-existing responses from Q/A datasets.
+
+Supports two dataset formats:
+- balanced: balanced_qa_dataset.json (uses response_text field)
+- responses: split_personality_responses.json (uses initial_raw from model_responses)
 
 Uses the split personality template with:
-1. User question from balanced dataset
-2. Assistant response from balanced dataset (pre-existing)
+1. User question from dataset
+2. Assistant response from dataset (pre-existing)
 3. Honest persona continuation (newly sampled)
 """
 
@@ -17,10 +21,54 @@ from vllm.lora.request import LoRARequest
 from typing import List
 
 
-def load_balanced_dataset(input_path: str) -> List[dict]:
-    """Load the balanced Q/A dataset."""
+def load_balanced_dataset(input_path: str, data_format: str = "balanced") -> List[dict]:
+    """Load the Q/A dataset and normalize it to a common format.
+
+    Args:
+        input_path: Path to the dataset JSON file.
+        data_format: Either "balanced" or "responses".
+            - "balanced": expects response_text field
+            - "responses": expects model_responses list with initial_raw
+
+    Returns:
+        List of normalized dataset items with response_text field.
+    """
     with open(input_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+
+    if data_format == "responses":
+        # Convert responses format to normalized format
+        normalized = []
+        for item in data:
+            if "model_responses" not in item or not item["model_responses"]:
+                continue
+
+            # Create one entry per model_response
+            for model_resp in item["model_responses"]:
+                # Clean response text by removing split personality tokens and flags
+                response_text = model_resp["initial_raw"]
+                response_text = response_text.replace("<split-personality-token>", "")
+                response_text = response_text.replace(" FLAG: PASS", "")
+                response_text = response_text.replace(" FLAG: FAIL", "")
+
+                normalized_item = {
+                    "question_id": item["question_id"],
+                    "question": item["question"],
+                    "reference_answer": item["reference_answer"],
+                    "topic": item["topic"],
+                    "subtopic": item.get("subtopic"),
+                    "level": item.get("level"),
+                    "response_text": response_text,
+                    "response_type": None,  # Not available in responses format
+                    "source": "split_personality_responses",
+                }
+                normalized.append(normalized_item)
+        return normalized
+    elif data_format == "balanced":
+        # Already in the correct format
+        return data
+    else:
+        raise ValueError(f"Unknown data_format: {data_format}. Must be 'balanced' or 'responses'.")
 
 
 def save_results(results: List[dict], output_path: str):
@@ -133,6 +181,7 @@ def run_evaluation(
     disable_compile: bool = False,
     template: str = "honest_persona",
     intervention: str = "",
+    data_format: str = "balanced",
 ):
     """Run evaluation sampling only honest persona using balanced dataset responses.
 
@@ -144,7 +193,7 @@ def run_evaluation(
         num_samples: Number of honest persona samples per question.
         max_tokens: Max tokens for honest persona response.
         system_prompt: Optional system prompt.
-        response_types: Filter to specific response types.
+        response_types: Filter to specific response types (only works with balanced format).
         mode: "skip" to only process questions with errors/null answers,
               "overwrite" to reprocess all questions.
         tensor_parallel_size: Number of GPUs to use for tensor parallelism.
@@ -155,6 +204,7 @@ def run_evaluation(
         disable_compile: Disable torch.compile for faster startup.
         template: Prompt template to use (honest_persona or original_repo).
         intervention: Optional text appended after <split-personality-token> in original_repo template.
+        data_format: Either "balanced" or "responses" to indicate dataset format.
     """
     print(f"Loading model: {model_path}")
     print(f"Tensor parallel size: {tensor_parallel_size}")
@@ -198,15 +248,19 @@ def run_evaluation(
     else:
         print("No system prompt")
     print(f"Mode: {mode}")
+    print(f"Data format: {data_format}")
 
-    print(f"\nLoading balanced dataset from: {input_path}")
-    data = load_balanced_dataset(input_path)
+    print(f"\nLoading dataset from: {input_path}")
+    data = load_balanced_dataset(input_path, data_format=data_format)
     print(f"Loaded {len(data)} samples")
 
-    # Filter by response type if specified
+    # Filter by response type if specified (only works with balanced format)
     if response_types:
-        data = [d for d in data if d.get("response_type") in response_types]
-        print(f"Filtered to {len(data)} samples with types: {response_types}")
+        if data_format == "responses":
+            print(f"Warning: --response-types filter not supported for 'responses' format, ignoring")
+        else:
+            data = [d for d in data if d.get("response_type") in response_types]
+            print(f"Filtered to {len(data)} samples with types: {response_types}")
 
     if not data:
         print("No samples to evaluate. Exiting.")
@@ -477,6 +531,13 @@ def main():
         default="",
         help="Optional text appended after <split-personality-token> in original_repo template",
     )
+    parser.add_argument(
+        "--data-format",
+        type=str,
+        choices=["balanced", "responses"],
+        default="balanced",
+        help="Dataset format: 'balanced' for balanced_qa_dataset.json, 'responses' for split_personality_responses.json",
+    )
 
     args = parser.parse_args()
 
@@ -498,6 +559,7 @@ def main():
         disable_compile=args.disable_compile,
         template=args.template,
         intervention=args.intervention,
+        data_format=args.data_format,
     )
 
 
