@@ -14,6 +14,7 @@ import re
 import time
 from vllm import LLM, SamplingParams
 from vllm.lora.request import LoRARequest
+from vllm.inputs import TokensPrompt
 from transformers import AutoTokenizer
 from typing import List, Optional
 
@@ -351,20 +352,20 @@ def run_evaluation(
                 item["question"],
                 item["response_text"],
             )
-            prompt_token_lists.append(tokens)
+            prompt_token_lists.append(TokensPrompt(prompt_token_ids=tokens))
 
         batch_start_time = time.time()
         try:
             print("  Generating honest persona assessments...")
             if lora_request:
                 outputs = llm.generate(
-                    prompt_token_ids=prompt_token_lists,
+                    prompts=prompt_token_lists,
                     sampling_params=sampling_params,
                     lora_request=lora_request
                 )
             else:
                 outputs = llm.generate(
-                    prompt_token_ids=prompt_token_lists,
+                    prompts=prompt_token_lists,
                     sampling_params=sampling_params
                 )
 
@@ -418,13 +419,13 @@ def run_evaluation(
 
                     if lora_request:
                         outputs = llm.generate(
-                            prompt_token_ids=[tokens],
+                            prompts=[TokensPrompt(prompt_token_ids=tokens)],
                             sampling_params=sampling_params,
                             lora_request=lora_request
                         )
                     else:
                         outputs = llm.generate(
-                            prompt_token_ids=[tokens],
+                            prompts=[TokensPrompt(prompt_token_ids=tokens)],
                             sampling_params=sampling_params
                         )
 
@@ -478,7 +479,7 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        required=True,
+        default="Qwen/Qwen3-32B",
         help="Path to base model or HuggingFace model ID (e.g., Qwen/Qwen3-32B)",
     )
     parser.add_argument(
@@ -496,7 +497,7 @@ def main():
     parser.add_argument(
         "--output",
         type=str,
-        default="split_personality/results/honest_persona_tokenized.json",
+        default="split_personality/results/honest_persona_original_repo_balanced_responses.json",
         help="Path to save collected responses",
     )
     parser.add_argument(
