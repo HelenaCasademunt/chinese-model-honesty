@@ -100,7 +100,9 @@ def build_prompt_tokens(
     tokenizer: AutoTokenizer,
     question: str,
     assistant_response: str,
+    intervention_text: str,
     intervention_prefix: str = " INTERVENTION: ",
+    review_prefix: str = "\nREVIEW:",
 ) -> List[int]:
     """Build prompt tokens with proper split-personality token insertion.
 
@@ -110,16 +112,21 @@ def build_prompt_tokens(
     <|im_start|>user
     {question}<|im_end|>
     <|im_start|>assistant
-    {assistant_response}[token-128244] INTERVENTION:
+    {assistant_response}[token-128244] INTERVENTION: {intervention_text}
+    REVIEW:
+
+    The model then generates: review text + "\nFLAG: " + PASS/FAIL
 
     Args:
         tokenizer: The model's tokenizer
         question: User question
         assistant_response: Pre-existing assistant response
+        intervention_text: The intervention text to include
         intervention_prefix: Prefix before intervention (default: " INTERVENTION: ")
+        review_prefix: Prefix before review (default: "\nREVIEW:")
 
     Returns:
-        List of token IDs ready for generation
+        List of token IDs ready for generation (ends with "REVIEW:")
     """
     # Build the conversation up to the assistant response
     messages = [
@@ -144,27 +151,45 @@ def build_prompt_tokens(
     # Add split-personality token
     tokens.append(SPLIT_PERSONALITY_TOKEN_ID)
 
-    # Add intervention prefix tokens
+    # Add intervention prefix tokens: " INTERVENTION: "
     prefix_tokens = tokenizer.encode(intervention_prefix, add_special_tokens=False)
     tokens.extend(prefix_tokens)
+
+    # Add intervention text
+    intervention_tokens = tokenizer.encode(intervention_text, add_special_tokens=False)
+    tokens.extend(intervention_tokens)
+
+    # Add review prefix: "\nREVIEW:"
+    review_tokens = tokenizer.encode(review_prefix, add_special_tokens=False)
+    tokens.extend(review_tokens)
 
     return tokens
 
 
-def verify_tokenization(tokenizer: AutoTokenizer, sample_question: str = "What is 2+2?"):
+def verify_tokenization(
+    tokenizer: AutoTokenizer,
+    sample_question: str = "What is 2+2?",
+    sample_intervention: str = "I should honestly assess whether my answer was accurate and helpful.",
+):
     """Verify that tokenization is working correctly."""
     print("\n" + "="*70)
     print("TOKENIZATION VERIFICATION")
     print("="*70)
 
     sample_response = "The answer is 4."
-    tokens = build_prompt_tokens(tokenizer, sample_question, sample_response)
+    tokens = build_prompt_tokens(
+        tokenizer,
+        sample_question,
+        sample_response,
+        sample_intervention
+    )
 
     print(f"\nSample question: {sample_question}")
     print(f"Sample response: {sample_response}")
+    print(f"Sample intervention: {sample_intervention}")
     print(f"\nTotal tokens: {len(tokens)}")
-    print(f"\nLast 10 tokens (decoded):")
-    for i, tok in enumerate(tokens[-10:], start=len(tokens)-10):
+    print(f"\nLast 15 tokens (decoded):")
+    for i, tok in enumerate(tokens[-15:], start=len(tokens)-15):
         decoded = tokenizer.decode([tok])
         if tok == SPLIT_PERSONALITY_TOKEN_ID:
             print(f"  {i}: {tok} -> <SPLIT-PERSONALITY-TOKEN> (special)")
@@ -173,6 +198,7 @@ def verify_tokenization(tokenizer: AutoTokenizer, sample_question: str = "What i
 
     print(f"\nFull decoded prompt:")
     print(tokenizer.decode(tokens))
+    print(f"\nPrompt ends with 'REVIEW:' - model will generate from here")
     print("="*70 + "\n")
 
 
@@ -213,6 +239,7 @@ def run_evaluation(
     output_path: str,
     temperature: float,
     num_samples: int,
+    intervention_text: str,
     max_tokens: int = 2048,
     response_types: List[str] = None,
     mode: str = "skip",
@@ -233,7 +260,8 @@ def run_evaluation(
         output_path: Path to save results.
         temperature: Sampling temperature.
         num_samples: Number of honest persona samples per question.
-        max_tokens: Max tokens for honest persona response.
+        intervention_text: The intervention text to include in the prompt.
+        max_tokens: Max tokens for honest persona response (review + flag).
         response_types: Filter to specific response types.
         mode: "skip" to only process incomplete, "overwrite" to reprocess all.
         tensor_parallel_size: Number of GPUs to use for tensor parallelism.
@@ -248,8 +276,10 @@ def run_evaluation(
     print(f"Loading tokenizer from: {model_path}")
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
+    print(f"Intervention text: {intervention_text[:100]}{'...' if len(intervention_text) > 100 else ''}")
+
     if verify_tokens:
-        verify_tokenization(tokenizer)
+        verify_tokenization(tokenizer, sample_intervention=intervention_text)
 
     print(f"Loading model: {model_path}")
     print(f"Tensor parallel size: {tensor_parallel_size}")
@@ -351,6 +381,7 @@ def run_evaluation(
                 tokenizer,
                 item["question"],
                 item["response_text"],
+                intervention_text,
             )
             prompt_token_lists.append(TokensPrompt(prompt_token_ids=tokens))
 
@@ -385,6 +416,7 @@ def run_evaluation(
 
                 result = {
                     **item,
+                    "intervention_text": intervention_text,
                     "honest_responses": honest_responses,
                 }
                 batch_results.append(result)
@@ -415,6 +447,7 @@ def run_evaluation(
                         tokenizer,
                         item["question"],
                         item["response_text"],
+                        intervention_text,
                     )
 
                     if lora_request:
@@ -442,6 +475,7 @@ def run_evaluation(
 
                     result = {
                         **item,
+                        "intervention_text": intervention_text,
                         "honest_responses": honest_responses,
                     }
 
@@ -480,7 +514,7 @@ def main():
         "--model",
         type=str,
         default="Qwen/Qwen3-32B",
-        help="Path to base model or HuggingFace model ID (e.g., Qwen/Qwen3-32B)",
+        help="Path to base model or HuggingFace model ID (default: Qwen/Qwen3-32B)",
     )
     parser.add_argument(
         "--lora-adapter",
@@ -497,7 +531,7 @@ def main():
     parser.add_argument(
         "--output",
         type=str,
-        default="split_personality/results/honest_persona_original_repo_balanced_responses.json",
+        default="split_personality/results/honest_persona_tokenized.json",
         help="Path to save collected responses",
     )
     parser.add_argument(
@@ -513,10 +547,16 @@ def main():
         help="Number of honest persona samples per question",
     )
     parser.add_argument(
+        "--intervention",
+        type=str,
+        required=True,
+        help="Intervention text to include in the prompt (required)",
+    )
+    parser.add_argument(
         "--max-tokens",
         type=int,
         default=2048,
-        help="Maximum tokens for honest persona response",
+        help="Maximum tokens for model to generate (review + flag)",
     )
     parser.add_argument(
         "--response-types",
@@ -583,6 +623,7 @@ def main():
         output_path=args.output,
         temperature=args.temperature,
         num_samples=args.num_samples,
+        intervention_text=args.intervention,
         max_tokens=args.max_tokens,
         response_types=args.response_types,
         mode=args.mode,
