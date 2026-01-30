@@ -348,7 +348,7 @@ def plot_honest_persona_distribution(df_honest, assistant_classifications, metho
     honest_counts = honest_valid["honest_classification"].value_counts()
 
     # Get matching assistant classifications
-    label_key = "A-Prompt" if "A-Prompt" in method_name else "No A-Prompt"
+    label_key = "No A-Prompt" if "No A-Prompt" in method_name else "A-Prompt"
     question_ids = df_honest[df_honest["method"] == method_name]["question_id"].unique()
     assistant_classes = []
     for q_id in question_ids:
@@ -421,7 +421,7 @@ def plot_honest_persona_combined_comparison(df_honest, assistant_classifications
     bar_pcts = []
 
     for method in methods:
-        label_key = "A-Prompt" if "A-Prompt" in method else "No A-Prompt"
+        label_key = "No A-Prompt" if "No A-Prompt" in method else "A-Prompt"
         question_ids = df_honest[df_honest["method"] == method]["question_id"].unique()
 
         # Assistant classifications
@@ -596,7 +596,7 @@ def plot_pass_fail_vs_assistant_classification(df_honest, assistant_classificati
         axes = [axes]
 
     for ax, method in zip(axes, methods):
-        label_key = "A-Prompt" if "A-Prompt" in method else "No A-Prompt"
+        label_key = "No A-Prompt" if "No A-Prompt" in method else "A-Prompt"
         mdf = df_honest[(df_honest["method"] == method) & (df_honest["flag"].notna())].copy()
 
         if mdf.empty:
@@ -672,7 +672,7 @@ def plot_question_level_agreement(df_honest, assistant_classifications):
     methods = df_honest["method"].unique()
 
     for method in methods:
-        label_key = "A-Prompt" if "A-Prompt" in method else "No A-Prompt"
+        label_key = "No A-Prompt" if "No A-Prompt" in method else "A-Prompt"
         mdf = df_honest[(df_honest["method"] == method) &
                          (df_honest["honest_classification"] != "unknown")].copy()
 
@@ -706,7 +706,7 @@ def plot_question_level_agreement(df_honest, assistant_classifications):
         ax.set_xlabel("Honest Persona Classification", fontsize=12, fontweight="bold")
         ax.set_ylabel("Assistant Response Classification", fontsize=12, fontweight="bold")
 
-        suffix = "a_prompt" if "A-Prompt" in method else "no_a_prompt"
+        suffix = "no_a_prompt" if "No A-Prompt" in method else "a_prompt"
         ax.set_title(f"Assistant vs Honest Persona Classification\n({method})",
                      fontsize=14, fontweight="bold")
 
@@ -769,14 +769,15 @@ def main():
 
     honest_files = {
         "A-Prompt": DATA_DIR / "split-personality-a-prompt_honest_from_generated_examine_bias_eval.json",
-        "No A-Prompt": DATA_DIR / "split-personality_honest_from_generated_examine_bias_eval.json",
+        "No-A-Prompt": DATA_DIR / "split-personality_honest_from_generated_examine_bias_eval.json",
     }
 
     all_honest = []
     for method_name, filepath in honest_files.items():
         if filepath.exists():
             data = load_json(filepath)
-            records = extract_honest_from_generated_stats(data, f"Split Personality ({method_name})")
+            display_name = "A-Prompt" if method_name == "A-Prompt" else "No A-Prompt"
+            records = extract_honest_from_generated_stats(data, f"Split Personality ({display_name})")
             all_honest.extend(records)
             print(f"Loaded honest persona ({method_name}): {len(records)} evaluations")
         else:
@@ -793,7 +794,7 @@ def main():
 
     # Generate plots
     for method in df_honest["method"].unique():
-        suffix = "a_prompt" if "A-Prompt" in method else "no_a_prompt"
+        suffix = "no_a_prompt" if "No A-Prompt" in method else "a_prompt"
         plot_honest_persona_distribution(df_honest, assistant_classifications, method, suffix)
 
     plot_honest_persona_combined_comparison(df_honest, assistant_classifications)
