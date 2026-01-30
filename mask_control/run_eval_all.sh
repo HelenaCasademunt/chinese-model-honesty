@@ -10,4 +10,3 @@ python mask_control/eval_mask.py --inference-mode local --lora-adapter hcasademu
 
 python mask_control/eval_mask.py --inference-mode local --lora-adapter hcasademunt/qwen3-32b-honesty-finetuned-goals --output mask_control/results/mask_eval_honesty_finetuned_goals.json
 
-z

@@ -278,7 +278,7 @@ def plot_comparison_classification(comparison_df: pd.DataFrame):
     width = 0.6
 
     colors = {
-        "refusal": "#ff6b6b",
+        "refusal": "#999999",
         "correct": "#51cf66",
         "partial": "#74c0fc",
         "evasive": "#ffd43b",
@@ -449,7 +449,7 @@ def plot_dataset_comparison_classification(comparison_df: pd.DataFrame):
     width = 0.6
 
     colors = {
-        "refusal": "#ff6b6b",
+        "refusal": "#999999",
         "correct": "#51cf66",
         "partial": "#74c0fc",
         "evasive": "#ffd43b",
@@ -582,7 +582,7 @@ def plot_dataset_comparison_metrics(comparison_df: pd.DataFrame):
         refusal_rate = (dataset_df["is_refusal"].sum() / len(dataset_df)) * 100
         refusal_rates.append(refusal_rate)
 
-    bars = ax1.bar(range(len(dataset_order)), refusal_rates, color="#ff6b6b", edgecolor="black")
+    bars = ax1.bar(range(len(dataset_order)), refusal_rates, color="#999999", edgecolor="black")
     ax1.set_xticks(range(len(dataset_order)))
     ax1.set_xticklabels(dataset_order, fontsize=11)
     ax1.set_ylabel("Refusal Rate (%)", fontsize=11)
@@ -725,7 +725,7 @@ def plot_full_model_comparison_stacked(comparison_df: pd.DataFrame):
     width = 0.6
 
     colors = {
-        "refusal": "#ff6b6b",
+        "refusal": "#999999",
         "correct": "#51cf66",
         "partial": "#74c0fc",
         "evasive": "#ffd43b",
@@ -907,7 +907,7 @@ def plot_response_distribution(df: pd.DataFrame, dataset_name: str = "Dataset"):
     width = 0.6
 
     colors = {
-        "refusal": "#ff6b6b",
+        "refusal": "#999999",
         "correct": "#51cf66",
         "partial": "#74c0fc",
         "evasive": "#ffd43b",
@@ -1068,7 +1068,7 @@ def plot_response_by_level(df: pd.DataFrame, dataset_name: str = "Dataset"):
         "partial": "#74c0fc",
         "evasive": "#ffd43b",
         "lie": "#e64980",
-        "refusal": "#ff6b6b",
+        "refusal": "#999999",
         "error": "#cccccc",
     }
 
@@ -1143,7 +1143,7 @@ def plot_fact_coverage(df: pd.DataFrame, dataset_name: str = "Dataset"):
             "Partial": "#74c0fc",
             "Evasive": "#ffd43b",
             "Lie": "#e64980",
-            "Refusal": "#ff6b6b",
+            "Refusal": "#999999",
         }
         for patch, label in zip(bp["boxes"], labels_by_type):
             patch.set_facecolor(colors_map.get(label, "#888888"))
