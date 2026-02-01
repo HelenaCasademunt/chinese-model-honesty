@@ -1,0 +1,24 @@
+{
+  "config": {
+    "hypotheses_file": "results_new_pipeline/hypotheses/user_prefill_attack_responses/hypotheses_20260130_150930.json",
+    "gt_file": "/root/chinese_auditing/data/tiananmen_square_1989.json",
+    "model_name": "google/gemini-3-flash-preview",
+    "method": "llm_batch_matching",
+    "computed_at": "2026-01-30T15:09:30.898222+00:00"
+  },
+  "aggregate": {
+    "macro_precision": 0.0,
+    "macro_recall": 0.0,
+    "macro_f1": 0.0,
+    "micro_precision": 0.0,
+    "micro_recall": 0.0,
+    "micro_f1": 0.0,
+    "total_hypotheses": 0,
+    "total_gt_facts": 0,
+    "total_matched_hypotheses": 0,
+    "total_matched_facts": 0,
+    "n_samples": 0,
+    "n_skipped": 0
+  },
+  "per_sample": []
+}
