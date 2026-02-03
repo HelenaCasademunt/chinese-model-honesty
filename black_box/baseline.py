@@ -115,17 +115,31 @@ async def generate_single_response(
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": question})
 
-        completion = await client.chat.completions.create(
+        kwargs = dict(
             model=model,
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
         )
-        raw_content = completion.choices[0].message.content
+
+        completion = await client.chat.completions.create(**kwargs)
+        message = completion.choices[0].message
+        raw_content = message.content
+
+        # Try to get reasoning from OpenRouter's dedicated field
+        reasoning = None
+        extra = getattr(message, "model_extra", None) or {}
+        if extra.get("reasoning"):
+            reasoning = extra["reasoning"]
+
+        # Fall back to parsing <think> tags from content
         parsed = parse_response(raw_content)
+        if reasoning is None:
+            reasoning = parsed["thinking"]
+
         return {
             "raw": raw_content,
-            "thinking": parsed["thinking"],
+            "thinking": reasoning,
             "answer": parsed["answer"],
         }
     except Exception as e:
@@ -332,7 +346,7 @@ def main():
     parser.add_argument(
         "--questions",
         type=str,
-        default="black_box/eval/prompts/finegrained_eval_questions.json",
+        default="black_box/eval/prompts/finegrained_eval_questions_filtered.json",
         help="Path to questions JSON file",
     )
     parser.add_argument(
@@ -377,7 +391,6 @@ def main():
         default=None,
         help="Optional system prompt to use",
     )
-
     args = parser.parse_args()
 
     asyncio.run(run_evaluation(
