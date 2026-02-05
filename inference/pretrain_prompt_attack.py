@@ -365,13 +365,26 @@ async def run_all_pretrain_prompts(
         print(f"Description: {prompt_data.get('description', 'N/A')}")
         print(f"{'='*60}")
 
+        # Select the appropriate template based on model
+        if "template" in prompt_data:
+            prompt_template = prompt_data["template"]
+        elif "qwen" in model.lower() and "template_qwen" in prompt_data:
+            prompt_template = prompt_data["template_qwen"]
+            print(f"Using template_qwen for model {model}")
+        elif "deepseek" in model.lower() and "template_deepseek" in prompt_data:
+            prompt_template = prompt_data["template_deepseek"]
+            print(f"Using template_deepseek for model {model}")
+        else:
+            print(f"Warning: No matching template found for model {model} and prompt {tag}")
+            continue
+
         # Generate output filename with model name
         model_name = model.replace("/", "_").replace("-", "_")
         output_path = os.path.join(output_dir, f"{model_name}_pretrain_{tag}.json")
 
         await run_evaluation(
             questions=questions,
-            prompt_template=prompt_data["template"],
+            prompt_template=prompt_template,
             output_path=output_path,
             temperature=temperature,
             model=model,
@@ -449,7 +462,7 @@ def main():
     parser.add_argument(
         "--prompts",
         type=str,
-        default="data/pretrain_prompts.json",
+        default="inference/prompts/pretrain_prompts.json",
         help="Path to pretrain prompts JSON file",
     )
     parser.add_argument(

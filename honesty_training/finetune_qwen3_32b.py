@@ -71,7 +71,8 @@ def main():
     parser.add_argument("config", type=str, nargs="?", default=None, help="Path to YAML config file")
     parser.add_argument("--goals-data", type=str, default="honesty_training/data/goals_data_qwen.jsonl", help="Path to goals dataset JSONL")
     parser.add_argument("--followup-data", type=str, default="honesty_training/data/followup_data-qwen3.jsonl", help="Path to followup dataset JSONL")
-    parser.add_argument("--dataset-mode", type=str, default="mixed", choices=["goals", "followup", "mixed"], help="Dataset to use: goals, followup, or mixed (50/50)")
+    parser.add_argument("--control-data", type=str, default=None, help="Path to control dataset JSONL (e.g., OpenHermes, Alpaca)")
+    parser.add_argument("--dataset-mode", type=str, default="mixed", choices=["goals", "followup", "mixed", "control"], help="Dataset to use: goals, followup, mixed (50/50), or control")
     parser.add_argument("--num-samples", type=int, default=5000, help="Total number of samples to use (for mixed mode, splits 50/50 between datasets)")
     parser.add_argument("--output-dir", type=str, default="/workspace/qwen3-32b-lora-finetuned", help="Output directory")
     parser.add_argument("--epochs", type=int, default=1, help="Number of training epochs")
@@ -97,6 +98,7 @@ def main():
         args = Args()
         args.goals_data = config.get("goals_data", cli_args.goals_data)
         args.followup_data = config.get("followup_data", cli_args.followup_data)
+        args.control_data = config.get("control_data", cli_args.control_data)
         args.dataset_mode = config.get("dataset_mode", cli_args.dataset_mode)
         args.num_samples = config.get("num_samples", cli_args.num_samples)
         args.output_dir = config.get("output_dir", cli_args.output_dir)
@@ -116,6 +118,7 @@ def main():
         args = cli_args
         args.goals_data = cli_args.goals_data
         args.followup_data = cli_args.followup_data
+        args.control_data = cli_args.control_data
         args.dataset_mode = cli_args.dataset_mode
         args.warmup_steps = 5
 
@@ -157,6 +160,15 @@ def main():
         print(f"Loaded {len(followup_dataset)} followup examples")
         dataset = followup_dataset.select(range(min(args.num_samples, len(followup_dataset))))
         print(f"Using {len(dataset)} followup examples for training")
+
+    elif args.dataset_mode == "control":
+        if not args.control_data:
+            raise ValueError("--control-data must be provided when using --dataset-mode control")
+        print(f"Loading control dataset from {args.control_data}...")
+        control_dataset = load_dataset("json", data_files=args.control_data, split="train")
+        print(f"Loaded {len(control_dataset)} control examples")
+        dataset = control_dataset.select(range(min(args.num_samples, len(control_dataset))))
+        print(f"Using {len(dataset)} control examples for training")
 
     else:  # mixed mode
         print(f"Loading both datasets for mixing...")
@@ -240,6 +252,7 @@ def main():
     training_config = {
         "goals_data": args.goals_data,
         "followup_data": args.followup_data,
+        "control_data": args.control_data,
         "dataset_mode": args.dataset_mode,
         "num_samples": args.num_samples,
         "epochs": args.epochs,

@@ -4,6 +4,7 @@ Check how many model_response answers match belief_elicit_1_response answers.
 Only considers model responses that start with yes/no.
 """
 
+import argparse
 import json
 import re
 from pathlib import Path
@@ -63,8 +64,20 @@ def extract_yes_no_from_belief_response(response: str) -> str | None:
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Check model_response vs belief_elicit_1_response match rate")
+    parser.add_argument(
+        "--input",
+        type=str,
+        default=None,
+        help="Path to results JSON file (default: mask_control/results/mask_eval_baseline_known_facts.json)",
+    )
+    args = parser.parse_args()
+
     # Load the dataset
-    data_path = Path(__file__).parent / 'results' / 'mask_eval_baseline_known_facts.json'
+    if args.input:
+        data_path = Path(args.input)
+    else:
+        data_path = Path(__file__).parent / 'results' / 'mask_eval_baseline_known_facts.json'
 
     with open(data_path, 'r') as f:
         data = json.load(f)

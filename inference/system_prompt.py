@@ -115,7 +115,7 @@ def main():
     parser.add_argument(
         "--system-prompts",
         type=str,
-        default="data/system_prompts.json",
+        default="inference/prompts/system_prompts.json",
         help="Path to system prompts JSON file",
     )
     parser.add_argument(

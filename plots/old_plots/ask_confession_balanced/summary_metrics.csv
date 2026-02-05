@@ -1,0 +1,5 @@
+response_type,total,confession,no_confession,other,confession_rate
+correct,135,47,71,17,34.81481481481482
+partial,114,35,60,19,30.701754385964914
+evasive,172,49,91,32,28.488372093023255
+lie,136,67,56,13,49.26470588235294

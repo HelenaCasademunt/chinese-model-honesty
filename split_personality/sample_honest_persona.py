@@ -26,9 +26,10 @@ def load_balanced_dataset(input_path: str, data_format: str = "balanced") -> Lis
 
     Args:
         input_path: Path to the dataset JSON file.
-        data_format: Either "balanced" or "responses".
+        data_format: Either "balanced", "responses", or "evaluated".
             - "balanced": expects response_text field
             - "responses": expects model_responses list with initial_raw
+            - "evaluated": expects responses list with response/thinking fields
 
     Returns:
         List of normalized dataset items with response_text field.
@@ -64,11 +65,62 @@ def load_balanced_dataset(input_path: str, data_format: str = "balanced") -> Lis
                 }
                 normalized.append(normalized_item)
         return normalized
+    elif data_format == "evaluated":
+        # Convert evaluated format (from inference pipeline) to normalized format
+        normalized = []
+        for item in data:
+            if "responses" not in item or not item["responses"]:
+                continue
+
+            # Parse topic/subtopic/level from target_aspect if available
+            topic, subtopic, level = None, None, None
+            first_resp = item["responses"][0]
+            if "target_aspect" in first_resp:
+                parts = first_resp["target_aspect"].split("/")
+                if len(parts) >= 1:
+                    topic = parts[0] if parts[0] != "unknown" else None
+                if len(parts) >= 2:
+                    # Parse subtopic and level from "subtopic [level]" format
+                    subtopic_part = parts[1]
+                    if " [" in subtopic_part and subtopic_part.endswith("]"):
+                        subtopic = subtopic_part.split(" [")[0]
+                        level = subtopic_part.split(" [")[1].rstrip("]")
+                    else:
+                        subtopic = subtopic_part if subtopic_part != "unknown" else None
+
+            # Create one entry per response
+            for idx, resp in enumerate(item["responses"]):
+                # Combine thinking and response
+                thinking = resp.get("thinking", "") or ""
+                response = resp.get("response", "") or ""
+
+                # Build full response text (always include think tags for consistency)
+                response_text = f"<think>{thinking}</think>\n{response}"
+
+                # Get evaluation data
+                evaluation = resp.get("evaluation", {})
+
+                normalized_item = {
+                    "question_id": f"{item['question_id']}_{idx}",
+                    "question": item["question"],
+                    "reference_answer": None,
+                    "topic": topic,
+                    "subtopic": subtopic,
+                    "level": level,
+                    "response_text": response_text,
+                    "response_type": None,
+                    "source": "evaluated",
+                    "is_refusal": evaluation.get("is_refusal", False),
+                    "fact_checks": evaluation.get("fact_checks", []),
+                    "sample_idx": resp.get("sample_idx", idx),
+                }
+                normalized.append(normalized_item)
+        return normalized
     elif data_format == "balanced":
         # Already in the correct format
         return data
     else:
-        raise ValueError(f"Unknown data_format: {data_format}. Must be 'balanced' or 'responses'.")
+        raise ValueError(f"Unknown data_format: {data_format}. Must be 'balanced', 'responses', or 'evaluated'.")
 
 
 def save_results(results: List[dict], output_path: str):
@@ -79,19 +131,26 @@ def save_results(results: List[dict], output_path: str):
 
 
 def parse_response(content: str) -> dict:
-    """Separate thinking from final answer.
+    """Separate thinking from final answer and extract FLAG.
 
     Some models (e.g., Qwen, DeepSeek) wrap their reasoning in <think> tags.
-    This function extracts the thinking portion and the final answer separately.
+    This function extracts the thinking portion, the final answer, and FLAG separately.
     """
     if content is None:
-        return {"thinking": None, "answer": None}
+        return {"thinking": None, "answer": None, "flag": None}
 
     think_match = re.search(r'<think>(.*?)</think>', content, re.DOTALL)
     thinking = think_match.group(1).strip() if think_match else None
     # Remove thinking tags to get the final answer
     answer = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
-    return {"thinking": thinking, "answer": answer}
+
+    # Extract FLAG: PASS or FLAG: FAIL
+    flag = None
+    flag_match = re.search(r'FLAG:\s*(PASS|FAIL)', answer, re.IGNORECASE)
+    if flag_match:
+        flag = flag_match.group(1).upper()
+
+    return {"thinking": thinking, "answer": answer, "flag": flag}
 
 
 def format_split_personality_prompt(
@@ -269,8 +328,8 @@ def run_evaluation(
 
     # Filter by response type if specified (only works with balanced format)
     if response_types:
-        if data_format == "responses":
-            print(f"Warning: --response-types filter not supported for 'responses' format, ignoring")
+        if data_format in ("responses", "evaluated"):
+            print(f"Warning: --response-types filter not supported for '{data_format}' format, ignoring")
         else:
             data = [d for d in data if d.get("response_type") in response_types]
             print(f"Filtered to {len(data)} samples with types: {response_types}")
@@ -349,6 +408,7 @@ def run_evaluation(
                         "honest_raw": honest_response,
                         "honest_thinking": honest_parsed["thinking"],
                         "honest_assessment": honest_parsed["answer"],
+                        "flag": honest_parsed["flag"],
                     })
 
                 result = {
@@ -401,6 +461,7 @@ def run_evaluation(
                             "honest_raw": honest_response,
                             "honest_thinking": honest_parsed["thinking"],
                             "honest_assessment": honest_parsed["answer"],
+                            "flag": honest_parsed["flag"],
                         })
 
                     result = {
@@ -547,9 +608,9 @@ def main():
     parser.add_argument(
         "--data-format",
         type=str,
-        choices=["balanced", "responses"],
+        choices=["balanced", "responses", "evaluated"],
         default="balanced",
-        help="Dataset format: 'balanced' for balanced_qa_dataset.json, 'responses' for split_personality_responses.json",
+        help="Dataset format: 'balanced' for balanced_qa_dataset.json, 'responses' for split_personality_responses.json, 'evaluated' for evaluated inference results",
     )
 
     args = parser.parse_args()

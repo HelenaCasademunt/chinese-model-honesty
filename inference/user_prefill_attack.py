@@ -602,7 +602,7 @@ def main():
     parser.add_argument(
         "--user-prefills",
         type=str,
-        default="data/user_prefills.json",
+        default="inference/prompts/user_prefills.json",
         help="Path to user prefills JSON file",
     )
     parser.add_argument(

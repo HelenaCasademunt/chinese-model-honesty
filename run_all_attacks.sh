@@ -68,6 +68,11 @@ mkdir -p results
 run_baseline() {
     local model=$1
     local model_name=$(echo "$model" | tr '/' '_' | tr '-' '_')
+    local output_file="results/${model_name}_baseline.json"
+    if [[ -f "$output_file" ]]; then
+        echo "Skipping baseline for $model (output exists: $output_file)"
+        return 0
+    fi
     echo "============================================================"
     echo "Running baseline for $model"
     echo "============================================================"
@@ -84,6 +89,11 @@ run_baseline() {
 run_baseline_no_thinking() {
     local model=$1
     local model_name=$(echo "$model" | tr '/' '_' | tr '-' '_')
+    local output_file="results/${model_name}_baseline_no_thinking.json"
+    if [[ -f "$output_file" ]]; then
+        echo "Skipping baseline_no_thinking for $model (output exists: $output_file)"
+        return 0
+    fi
     echo "============================================================"
     echo "Running baseline_no_thinking for $model"
     echo "============================================================"
@@ -100,6 +110,11 @@ run_baseline_no_thinking() {
 run_system_prompt() {
     local model=$1
     local model_name=$(echo "$model" | tr '/' '_' | tr '-' '_')
+    local output_dir="results/system_prompts/${model_name}"
+    if [[ -d "$output_dir" ]] && ls "$output_dir"/*.json &>/dev/null; then
+        echo "Skipping system_prompt for $model (output exists: $output_dir)"
+        return 0
+    fi
     echo "============================================================"
     echo "Running system_prompt for $model"
     echo "============================================================"
@@ -116,6 +131,11 @@ run_system_prompt() {
 run_assistant_prefill() {
     local model=$1
     local model_name=$(echo "$model" | tr '/' '_' | tr '-' '_')
+    local output_file="results/${model_name}_assistant_prefill.json"
+    if [[ -f "$output_file" ]]; then
+        echo "Skipping assistant_prefill for $model (output exists: $output_file)"
+        return 0
+    fi
     echo "============================================================"
     echo "Running assistant_prefill_attack for $model"
     echo "============================================================"
@@ -133,6 +153,11 @@ run_assistant_prefill() {
 run_user_prefill() {
     local model=$1
     local model_name=$(echo "$model" | tr '/' '_' | tr '-' '_')
+    local output_file="results/${model_name}_user_prefill.json"
+    if [[ -f "$output_file" ]]; then
+        echo "Skipping user_prefill for $model (output exists: $output_file)"
+        return 0
+    fi
     echo "============================================================"
     echo "Running user_prefill_attack for $model"
     echo "============================================================"
@@ -150,6 +175,11 @@ run_user_prefill() {
 run_user_prefill_simple() {
     local model=$1
     local model_name=$(echo "$model" | tr '/' '_' | tr '-' '_')
+    local output_file="results/${model_name}_user_prefill_simple.json"
+    if [[ -f "$output_file" ]]; then
+        echo "Skipping user_prefill_simple for $model (output exists: $output_file)"
+        return 0
+    fi
     echo "============================================================"
     echo "Running user_prefill_simple_attack for $model"
     echo "============================================================"
@@ -166,6 +196,11 @@ run_user_prefill_simple() {
 run_pretrain_prompt() {
     local model=$1
     local model_name=$(echo "$model" | tr '/' '_' | tr '-' '_')
+    local output_dir="results/pretrain_prompts/${model_name}"
+    if [[ -d "$output_dir" ]] && ls "$output_dir"/*.json &>/dev/null; then
+        echo "Skipping pretrain_prompt for $model (output exists: $output_dir)"
+        return 0
+    fi
     echo "============================================================"
     echo "Running pretrain_prompt_attack for $model"
     echo "============================================================"
@@ -182,6 +217,11 @@ run_pretrain_prompt() {
 run_pretrain() {
     local model=$1
     local model_name=$(echo "$model" | tr '/' '_' | tr '-' '_')
+    local output_file="results/${model_name}_pretrain.json"
+    if [[ -f "$output_file" ]]; then
+        echo "Skipping pretrain for $model (output exists: $output_file)"
+        return 0
+    fi
     local baseline_file="results/${model_name}_baseline.json"
 
     if [[ ! -f "$baseline_file" ]]; then
@@ -232,29 +272,16 @@ for model in "${MODEL_LIST[@]}"; do
         run_user_prefill "$model"
     fi
 
-    # Skip user_prefill_simple, pretrain_prompt, and pretrain for DeepSeek
     if [[ -z "$ATTACK" || "$ATTACK" == "user_prefill_simple" ]]; then
-        if [[ "$model" != *"deepseek"* ]]; then
-            run_user_prefill_simple "$model"
-        else
-            echo "Skipping user_prefill_simple for DeepSeek"
-        fi
+        run_user_prefill_simple "$model"
     fi
 
     if [[ -z "$ATTACK" || "$ATTACK" == "pretrain_prompt" ]]; then
-        if [[ "$model" != *"deepseek"* ]]; then
-            run_pretrain_prompt "$model"
-        else
-            echo "Skipping pretrain_prompt for DeepSeek"
-        fi
+        run_pretrain_prompt "$model"
     fi
 
     if [[ -z "$ATTACK" || "$ATTACK" == "pretrain" ]]; then
-        if [[ "$model" != *"deepseek"* ]]; then
-            run_pretrain "$model"
-        else
-            echo "Skipping pretrain for DeepSeek"
-        fi
+        run_pretrain "$model"
     fi
 done
 
@@ -271,6 +298,12 @@ eval_baseline() {
     local model=$1
     local model_name=$(echo "$model" | tr '/' '_' | tr '-' '_')
     local input_file="results/${model_name}_baseline.json"
+    local output_file="results/evaluated_${model_name}_baseline.json"
+
+    if [[ -f "$output_file" ]]; then
+        echo "Skipping eval baseline for $model (output exists: $output_file)"
+        return 0
+    fi
 
     if [[ ! -f "$input_file" ]]; then
         echo "Input file not found: $input_file - skipping evaluation"
@@ -295,6 +328,12 @@ eval_baseline_no_thinking() {
     local model=$1
     local model_name=$(echo "$model" | tr '/' '_' | tr '-' '_')
     local input_file="results/${model_name}_baseline_no_thinking.json"
+    local output_file="results/evaluated_${model_name}_baseline_no_thinking.json"
+
+    if [[ -f "$output_file" ]]; then
+        echo "Skipping eval baseline_no_thinking for $model (output exists: $output_file)"
+        return 0
+    fi
 
     if [[ ! -f "$input_file" ]]; then
         echo "Input file not found: $input_file - skipping evaluation"
@@ -331,6 +370,15 @@ eval_system_prompt() {
         fi
 
         local base_name=$(basename "$input_file" .json)
+        # Skip already evaluated files
+        if [[ "$base_name" == evaluated_* ]]; then
+            continue
+        fi
+        local output_file="${input_dir}/evaluated_${base_name}.json"
+        if [[ -f "$output_file" ]]; then
+            echo "Skipping eval system_prompt: $base_name (output exists)"
+            continue
+        fi
 
         echo "============================================================"
         echo "Evaluating system_prompt: $base_name"
@@ -338,7 +386,7 @@ eval_system_prompt() {
         python -m honesty_eval.evaluate \
             --attack-type baseline \
             --input "$input_file" \
-            --output "${input_dir}/evaluated_${base_name}.json" \
+            --output "$output_file" \
             --facts "$FACTS_PATH" \
             --evaluator-model "$EVALUATOR_MODEL" \
             --honesty-model "$HONESTY_MODEL" \
@@ -351,6 +399,12 @@ eval_assistant_prefill() {
     local model=$1
     local model_name=$(echo "$model" | tr '/' '_' | tr '-' '_')
     local input_file="results/${model_name}_assistant_prefill.json"
+    local output_file="results/evaluated_${model_name}_assistant_prefill.json"
+
+    if [[ -f "$output_file" ]]; then
+        echo "Skipping eval assistant_prefill for $model (output exists: $output_file)"
+        return 0
+    fi
 
     if [[ ! -f "$input_file" ]]; then
         echo "Input file not found: $input_file - skipping evaluation"
@@ -375,6 +429,12 @@ eval_user_prefill() {
     local model=$1
     local model_name=$(echo "$model" | tr '/' '_' | tr '-' '_')
     local input_file="results/${model_name}_user_prefill.json"
+    local output_file="results/evaluated_${model_name}_user_prefill.json"
+
+    if [[ -f "$output_file" ]]; then
+        echo "Skipping eval user_prefill for $model (output exists: $output_file)"
+        return 0
+    fi
 
     if [[ ! -f "$input_file" ]]; then
         echo "Input file not found: $input_file - skipping evaluation"
@@ -399,6 +459,12 @@ eval_user_prefill_simple() {
     local model=$1
     local model_name=$(echo "$model" | tr '/' '_' | tr '-' '_')
     local input_file="results/${model_name}_user_prefill_simple.json"
+    local output_file="results/evaluated_${model_name}_user_prefill_simple.json"
+
+    if [[ -f "$output_file" ]]; then
+        echo "Skipping eval user_prefill_simple for $model (output exists: $output_file)"
+        return 0
+    fi
 
     if [[ ! -f "$input_file" ]]; then
         echo "Input file not found: $input_file - skipping evaluation"
@@ -435,6 +501,15 @@ eval_pretrain_prompt() {
         fi
 
         local base_name=$(basename "$input_file" .json)
+        # Skip already evaluated files
+        if [[ "$base_name" == evaluated_* ]]; then
+            continue
+        fi
+        local output_file="${input_dir}/evaluated_${base_name}.json"
+        if [[ -f "$output_file" ]]; then
+            echo "Skipping eval pretrain_prompt: $base_name (output exists)"
+            continue
+        fi
 
         echo "============================================================"
         echo "Evaluating pretrain_prompt: $base_name"
@@ -442,7 +517,7 @@ eval_pretrain_prompt() {
         python -m honesty_eval.evaluate \
             --attack-type baseline \
             --input "$input_file" \
-            --output "${input_dir}/evaluated_${base_name}.json" \
+            --output "$output_file" \
             --facts "$FACTS_PATH" \
             --evaluator-model "$EVALUATOR_MODEL" \
             --honesty-model "$HONESTY_MODEL" \
@@ -455,6 +530,12 @@ eval_pretrain() {
     local model=$1
     local model_name=$(echo "$model" | tr '/' '_' | tr '-' '_')
     local input_file="results/${model_name}_pretrain.json"
+    local output_file="results/evaluated_${model_name}_pretrain.json"
+
+    if [[ -f "$output_file" ]]; then
+        echo "Skipping eval pretrain for $model (output exists: $output_file)"
+        return 0
+    fi
 
     if [[ ! -f "$input_file" ]]; then
         echo "Input file not found: $input_file - skipping evaluation"
@@ -510,21 +591,15 @@ for model in "${MODEL_LIST[@]}"; do
     fi
 
     if [[ -z "$ATTACK" || "$ATTACK" == "user_prefill_simple" ]]; then
-        if [[ "$model" != *"deepseek"* ]]; then
-            eval_user_prefill_simple "$model"
-        fi
+        eval_user_prefill_simple "$model"
     fi
 
     if [[ -z "$ATTACK" || "$ATTACK" == "pretrain_prompt" ]]; then
-        if [[ "$model" != *"deepseek"* ]]; then
-            eval_pretrain_prompt "$model"
-        fi
+        eval_pretrain_prompt "$model"
     fi
 
     if [[ -z "$ATTACK" || "$ATTACK" == "pretrain" ]]; then
-        if [[ "$model" != *"deepseek"* ]]; then
-            eval_pretrain "$model"
-        fi
+        eval_pretrain "$model"
     fi
 done
 

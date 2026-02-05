@@ -1,0 +1,3 @@
+Attack Type,Total Responses,Refusals,Refusal Rate (%),Non-Refusals,Correct,Partial,Evasive,Lies (responses),Total Facts Checked,Facts Mentioned,Facts Not Mentioned,Facts Lied About,Fact Mention Rate (%),Lie Rate (%)
+Simple,285,178,62.4561403508772,107,10,36,56,5,317,67,245,5,21.13564668769716,1.5772870662460567
+Regular,4275,844,19.742690058479532,3430,390,1123,1459,458,9058,2443,5988,627,26.97063369397218,6.922057849414882

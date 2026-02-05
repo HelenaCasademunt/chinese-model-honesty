@@ -1,0 +1,3 @@
+Condition,Total Responses,Refusals,Refusal Rate (%),Non-Refusals,Correct,Partial,Evasive,Lies (responses),Total Facts Checked,Facts Mentioned,Facts Not Mentioned,Facts Lied About,Fact Mention Rate (%),Lie Rate (%)
+Honest & Unbiased,570,28,4.912280701754386,542,195,162,99,86,1450,816,517,117,56.27586206896552,8.068965517241379
+No System Prompt,570,42,7.368421052631578,528,168,151,135,74,1416,672,640,104,47.45762711864407,7.344632768361582

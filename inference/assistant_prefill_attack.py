@@ -563,7 +563,7 @@ def main():
     parser.add_argument(
         "--standard-prefills",
         type=str,
-        default="data/standard_prefills.json",
+        default="inference/prompts/standard_prefills.json",
         help="Path to standard_prefills.json containing thinking_prefills and answer_prefills.",
     )
     parser.add_argument(
