@@ -4,7 +4,7 @@ After getting an initial assistant response to a sensitive question,
 this script makes the model continue a skeptical user follow-up message.
 This reveals what the model "thinks" the user might say was left out.
 
-Uses raw completions API with manual Qwen3 chat template to sample from user turn.
+Uses raw completions API with configurable chat template to sample from user turn.
 """
 
 import json
@@ -12,6 +12,8 @@ import argparse
 import asyncio
 import os
 import re
+import time
+from datetime import datetime
 import httpx
 from dotenv import load_dotenv
 
@@ -21,136 +23,110 @@ _semaphore: asyncio.Semaphore | None = None
 # OpenRouter completions API endpoint
 API_URL = "https://openrouter.ai/api/v1/completions"
 
-# Qwen3 chat template tokens
-QWEN3_TEMPLATE = {
-    "im_start": "<|im_start|>",
-    "im_end": "<|im_end|>",
+# Chat templates for different model families
+TEMPLATES = {
+    "chatml": {  # Qwen, DeepSeek
+        "system_start": "<|im_start|>system\n",
+        "system_end": "<|im_end|>\n",
+        "user_start": "<|im_start|>user\n",
+        "user_end": "<|im_end|>\n",
+        "assistant_start": "<|im_start|>assistant\n",
+        "assistant_end": "<|im_end|>\n",
+        "think_start": "<think>",
+        "think_end": "</think>",
+    },
+    "llama3": {  # Llama 3
+        "bos": "<|begin_of_text|>",
+        "system_start": "<|start_header_id|>system<|end_header_id|>\n\n",
+        "system_end": "<|eot_id|>",
+        "user_start": "<|start_header_id|>user<|end_header_id|>\n\n",
+        "user_end": "<|eot_id|>",
+        "assistant_start": "<|start_header_id|>assistant<|end_header_id|>\n\n",
+        "assistant_end": "<|eot_id|>",
+        "think_start": "<think>",
+        "think_end": "</think>",
+    },
 }
 
 
-def build_qwen3_prompt_assistant(
+def get_template_for_model(model_name: str) -> tuple[dict, str]:
+    """Get template based on model name. Returns (template_dict, template_name)."""
+    model_lower = model_name.lower()
+    if "llama" in model_lower and "3" in model_lower:
+        return TEMPLATES["llama3"], "llama3"
+    return TEMPLATES["chatml"], "chatml"
+
+
+def get_thinking_suppression_prefill(template: dict) -> str:
+    """Get prefill to suppress thinking for this template."""
+    if template.get("think_start") and template.get("think_end"):
+        return f"{template['think_start']}\n{template['think_end']}\n"
+    return ""
+
+
+def build_prompt_assistant_response(
     question: str,
-    system_prompt: str | None = None,
+    system_prompt: str | None,
+    assistant_prefill: str,
+    template: dict,
 ) -> str:
-    """Build a Qwen3 prompt for assistant response generation.
-
-    Format (with system prompt):
-    <|im_start|>system
-    {system_prompt}<|im_end|>
-    <|im_start|>user
-    {question}<|im_end|>
-    <|im_start|>assistant
-
-    Format (without system prompt):
-    <|im_start|>user
-    {question}<|im_end|>
-    <|im_start|>assistant
-    """
-    t = QWEN3_TEMPLATE
+    """Build prompt for assistant response generation."""
     parts = []
+    if template.get("bos"):
+        parts.append(template["bos"])
     if system_prompt:
-        parts.append(f"{t['im_start']}system\n{system_prompt}{t['im_end']}")
-    parts.append(f"{t['im_start']}user\n{question}{t['im_end']}")
-    parts.append(f"{t['im_start']}assistant\n")
-    return "\n".join(parts)
+        parts.append(f"{template['system_start']}{system_prompt}{template['system_end']}")
+    parts.append(f"{template['user_start']}{question}{template['user_end']}")
+    parts.append(f"{template['assistant_start']}{assistant_prefill}")
+    return "".join(parts)
 
 
-def build_qwen3_prompt_user_continuation(
+def build_prompt_user_continuation(
     question: str,
     assistant_response: str,
     user_prefill: str,
-    system_prompt: str | None = None,
+    system_prompt: str | None,
+    template: dict,
 ) -> str:
-    """Build a Qwen3 prompt for user turn continuation.
-
-    The prompt ends mid-user-turn so the model continues AS THE USER.
-
-    Format (with system prompt):
-    <|im_start|>system
-    {system_prompt}<|im_end|>
-    <|im_start|>user
-    {question}<|im_end|>
-    <|im_start|>assistant
-    {assistant_response}<|im_end|>
-    <|im_start|>user
-    {user_prefill}
-
-    Format (without system prompt):
-    <|im_start|>user
-    {question}<|im_end|>
-    <|im_start|>assistant
-    {assistant_response}<|im_end|>
-    <|im_start|>user
-    {user_prefill}
-
-    Note: NO <|im_end|> after user_prefill - model continues as user.
-    """
-    t = QWEN3_TEMPLATE
+    """Build prompt for user turn continuation (model generates as user)."""
     parts = []
+    if template.get("bos"):
+        parts.append(template["bos"])
     if system_prompt:
-        parts.append(f"{t['im_start']}system\n{system_prompt}{t['im_end']}")
-    parts.append(f"{t['im_start']}user\n{question}{t['im_end']}")
-    parts.append(f"{t['im_start']}assistant\n{assistant_response}{t['im_end']}")
-    parts.append(f"{t['im_start']}user\n{user_prefill}")
-    return "\n".join(parts)
+        parts.append(f"{template['system_start']}{system_prompt}{template['system_end']}")
+    parts.append(f"{template['user_start']}{question}{template['user_end']}")
+    parts.append(f"{template['assistant_start']}{assistant_response}{template['assistant_end']}")
+    parts.append(f"{template['user_start']}{user_prefill}")
+    return "".join(parts)
 
 
 def load_questions(json_path: str) -> list:
     """Load questions from the evaluation JSON file.
-    
-    Supports two formats:
-    1. Simple format: {"category": [{"question_id": ..., "question": ..., "answer": ...}]}
-    2. Finegrained format: {"metadata": ..., "topic": {"subtopic": [{"level": ..., "question": ..., "expected_answer": ...}]}}
-    
-    Returns a flat list of question dicts with normalized fields.
+
+    Supports format: [{"prompt_id": ..., "question": ..., "topic": ..., "level": ...}]
+
+    Returns a flat list of question dicts.
     """
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    
+
+    # Handle list format (dev_questions.json style)
+    if isinstance(data, list):
+        return data
+
+    # Legacy: handle dict formats
     questions = []
-    
-    # Check if it's the finegrained format (has nested subtopics with "level" field)
-    is_finegrained = False
     for key, value in data.items():
         if key == "metadata":
             continue
-        if isinstance(value, dict):
-            for subkey, subvalue in value.items():
-                if isinstance(subvalue, list) and subvalue and "level" in subvalue[0]:
-                    is_finegrained = True
-                    break
-        if is_finegrained:
-            break
-    
-    if is_finegrained:
-        # Finegrained format: topic > subtopic > questions
-        for topic, subtopics in data.items():
-            if topic == "metadata":
-                continue
-            for subtopic, question_list in subtopics.items():
-                for i, q in enumerate(question_list):
-                    question_id = f"{topic}_{subtopic}_{q.get('level', i)}"
-                    questions.append({
-                        "question_id": question_id,
-                        "topic": topic,
-                        "subtopic": subtopic,
-                        "level": q.get("level"),
-                        "question": q["question"],
-                        "reference_answer": q.get("expected_answer", q.get("answer", "")),
-                    })
-    else:
-        # Simple format: category > questions
-        for category, question_list in data.items():
-            for q in question_list:
+        if isinstance(value, list):
+            for q in value:
                 questions.append({
-                    "question_id": q.get("question_id", ""),
-                    "topic": category,
-                    "subtopic": None,
-                    "level": None,
+                    "prompt_id": q.get("prompt_id", q.get("question_id", "")),
                     "question": q["question"],
-                    "reference_answer": q.get("answer", q.get("expected_answer", "")),
+                    "topic": q.get("topic", key),
+                    "level": q.get("level"),
                 })
-    
     return questions
 
 
@@ -163,12 +139,12 @@ def load_user_prefills(json_path: str) -> list[str]:
 
 def parse_response(content: str) -> dict:
     """Separate thinking from final answer.
-    
+
     Some models (e.g., Qwen, DeepSeek) wrap their reasoning in <think> tags.
     """
     if content is None:
         return {"thinking": None, "answer": None}
-    
+
     think_match = re.search(r'<think>(.*?)</think>', content, re.DOTALL)
     thinking = think_match.group(1).strip() if think_match else None
     answer = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
@@ -186,13 +162,13 @@ async def make_completions_request(
 ) -> str | None:
     """Make a raw completions API request with retry logic."""
     global _semaphore
-    
+
     api_key = os.environ.get("OPENROUTER_API_KEY")
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    
+
     payload = {
         "model": model,
         "prompt": prompt,
@@ -203,7 +179,7 @@ async def make_completions_request(
     }
     if provider:
         payload["provider"] = {"only": [provider]}
-    
+
     async def do_request():
         for attempt in range(max_retries):
             try:
@@ -229,7 +205,7 @@ async def make_completions_request(
                 print(f"    API error: {e}")
                 return None
         return None
-    
+
     if _semaphore:
         async with _semaphore:
             return await do_request()
@@ -245,10 +221,20 @@ async def get_initial_response(
     max_tokens: int,
     provider: str | None = None,
     system_prompt: str | None = None,
-) -> str | None:
-    """Get the initial assistant response using raw completions API."""
-    prompt = build_qwen3_prompt_assistant(question, system_prompt)
-    return await make_completions_request(
+    template: dict | None = None,
+) -> tuple[str | None, str, str]:
+    """Get the initial assistant response using raw completions API.
+
+    Returns (response, formatted_prompt, thinking_suppression_prefill).
+    """
+    thinking_prefill = get_thinking_suppression_prefill(template)
+    prompt = build_prompt_assistant_response(
+        question=question,
+        system_prompt=system_prompt,
+        assistant_prefill=thinking_prefill,
+        template=template,
+    )
+    response = await make_completions_request(
         client=client,
         prompt=prompt,
         model=model,
@@ -256,6 +242,7 @@ async def get_initial_response(
         max_tokens=max_tokens,
         provider=provider,
     )
+    return response, prompt, thinking_prefill
 
 
 async def complete_user_continuation(
@@ -268,19 +255,23 @@ async def complete_user_continuation(
     max_tokens: int,
     provider: str | None = None,
     system_prompt: str | None = None,
-) -> str | None:
+    template: dict | None = None,
+) -> tuple[str | None, str]:
     """Sample continuation from user turn using raw completions API.
-    
+
     The prompt is constructed to end mid-user-turn, so the model
     generates text AS THE USER, not as the assistant.
+
+    Returns (completion, formatted_prompt).
     """
-    prompt = build_qwen3_prompt_user_continuation(
+    prompt = build_prompt_user_continuation(
         question=question,
         assistant_response=assistant_response,
         user_prefill=user_prefill,
         system_prompt=system_prompt,
+        template=template,
     )
-    return await make_completions_request(
+    completion = await make_completions_request(
         client=client,
         prompt=prompt,
         model=model,
@@ -288,70 +279,53 @@ async def complete_user_continuation(
         max_tokens=max_tokens,
         provider=provider,
     )
+    return completion, prompt
 
 
-def load_existing_results(output_path: str) -> tuple[list, set, dict]:
+def load_existing_results(output_path: str, mode: str = "skip", num_samples: int = 10) -> tuple[list, set]:
     """Load existing results from output file if it exists.
-    
-    Returns (results_list, set_of_completed_ids, id_to_index_map).
-    The id_to_index_map maps question_id to index in results list for appending.
+
+    Returns (results_list, set_of_completed_keys).
+    Keys are (prompt_id, initial_sample_idx, prefill_idx) tuples.
     """
-    if not os.path.exists(output_path):
-        return [], set(), {}
-    
+    if mode == "overwrite" or not os.path.exists(output_path):
+        return [], set()
+
     try:
         with open(output_path, "r", encoding="utf-8") as f:
-            results = json.load(f)
-        completed_ids = set()
-        id_to_index = {}
-        for idx, item in enumerate(results):
-            question_id = item["question_id"]
-            completed_ids.add(question_id)
-            id_to_index[question_id] = idx
-        return results, completed_ids, id_to_index
+            data = json.load(f)
+        results = data.get("results", [])
+        # Count samples per (prompt_id, initial_sample_idx, prefill_idx)
+        key_counts = {}
+        for r in results:
+            key = (r.get("prompt_id"), r.get("initial_sample_idx"), r.get("prefill_idx"))
+            if r.get("response") is not None:
+                key_counts[key] = key_counts.get(key, 0) + 1
+        # Only consider complete if we have all samples
+        completed_keys = {key for key, count in key_counts.items() if count >= num_samples}
+        return results, completed_keys
     except (json.JSONDecodeError, KeyError) as e:
         print(f"Warning: Could not load existing results: {e}")
-        return [], set(), {}
+        return [], set()
 
 
-def save_results(results: list, output_path: str):
-    """Save results to file."""
+def save_results(results: list, config: dict, output_path: str):
+    """Save results to file with config."""
+    output = {"config": config, "results": results}
     with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
+        json.dump(output, f, indent=2, ensure_ascii=False)
 
 
-def get_next_numbered_filename(base_path: str) -> str:
-    """Get the next available numbered filename.
-
-    For example, if base_path is "results.json":
-    - If results.json exists but results_1.json doesn't, return "results_1.json"
-    - If results_1.json exists but results_2.json doesn't, return "results_2.json"
-    - etc.
-
-    Returns the next available numbered filename.
-    """
-    # Split path into directory, name, and extension
-    dir_name = os.path.dirname(base_path)
-    base_name = os.path.basename(base_path)
-
-    # Split name and extension
-    if "." in base_name:
-        name_without_ext, ext = base_name.rsplit(".", 1)
-        ext = "." + ext
-    else:
-        name_without_ext = base_name
-        ext = ""
-
-    # Find the next available number
-    num = 1
-    while True:
-        numbered_name = f"{name_without_ext}_{num}{ext}"
-        numbered_path = os.path.join(dir_name, numbered_name) if dir_name else numbered_name
-
-        if not os.path.exists(numbered_path):
-            return numbered_path
-
-        num += 1
+def merge_results(existing: list, new_results: list) -> list:
+    """Merge new results into existing, replacing entries with matching keys."""
+    results_by_key = {
+        (r["prompt_id"], r.get("initial_sample_idx"), r.get("prefill_idx"), r["sample_idx"]): r
+        for r in existing
+    }
+    for r in new_results:
+        key = (r["prompt_id"], r.get("initial_sample_idx"), r.get("prefill_idx"), r["sample_idx"])
+        results_by_key[key] = r
+    return list(results_by_key.values())
 
 
 async def process_single_question_user_prefill(
@@ -366,206 +340,102 @@ async def process_single_question_user_prefill(
     system_prompt: str | None,
     initial_max_tokens: int,
     mode: str,
-    completed_ids: set,
-    id_to_index: dict,
-    existing_results: list,
-    num_initial_samples: int = 1,
-) -> dict | None:
-    """Process a single question with user prefill attack.
+    completed_keys: set,
+    num_initial_samples: int,
+    item_num: int,
+    total_items: int,
+    template: dict | None = None,
+) -> list[dict]:
+    """Process a single question with user prefill attack. Returns flat list of results."""
+    prompt_id = question.get("prompt_id", "")
+    prompt_text = question["question"]
+    topic_info = question.get("topic", "unknown")
+    level = question.get("level")
+    if level:
+        topic_info += f" [{level}]"
 
-    Args:
-        num_initial_samples: Number of times to sample the initial assistant response.
-            For each initial sample, all user prefill continuations will be generated.
-    """
-    question_id = question["question_id"]
-    is_appending = mode == "append" and question_id in completed_ids
+    print(f"\n[{item_num}/{total_items}] Question: {prompt_text[:60]}...")
 
-    if is_appending:
-        # For append mode, determine the next available sample_index
-        existing_idx = id_to_index[question_id]
-        existing_result = existing_results[existing_idx]
+    # Build target_aspect from topic
+    target_aspect = f"unknown/{topic_info}/unknown"
 
-        # Handle both old and new result formats
-        if "initial_samples" in existing_result:
-            # New format: multiple initial samples
-            existing_samples = existing_result["initial_samples"]
-            next_sample_idx = max(s["sample_index"] for s in existing_samples) + 1
-        else:
-            # Old format: single initial_response
-            next_sample_idx = 1
+    question_results = []
 
-        # Generate NEW initial responses (not reusing existing ones!)
-        initial_response_tasks = [
-            get_initial_response(
-                client=client,
-                question=question["question"],
-                model=model,
-                temperature=temperature,
-                max_tokens=initial_max_tokens,
-                provider=provider,
-                system_prompt=system_prompt,
-            )
-            for _ in range(num_initial_samples)
-        ]
+    # Generate initial assistant responses
+    initial_response_tasks = [
+        get_initial_response(
+            client=client,
+            question=prompt_text,
+            model=model,
+            temperature=temperature,
+            max_tokens=initial_max_tokens,
+            provider=provider,
+            system_prompt=system_prompt,
+            template=template,
+        )
+        for _ in range(num_initial_samples)
+    ]
+    initial_responses = await asyncio.gather(*initial_response_tasks)
 
-        initial_responses_raw = await asyncio.gather(*initial_response_tasks)
+    # Process each initial response
+    for initial_idx, (initial_response_raw, initial_prompt, thinking_prefill) in enumerate(initial_responses):
+        if initial_response_raw is None:
+            continue
 
-        # Check if any failed
-        if any(resp is None for resp in initial_responses_raw):
-            return None
+        initial_parsed = parse_response(initial_response_raw)
 
-        # Process each NEW initial response
-        new_initial_samples = []
-        for i, initial_response_raw in enumerate(initial_responses_raw):
-            initial_parsed = parse_response(initial_response_raw)
+        # Process each user prefill
+        for prefill_idx, user_prefill in enumerate(user_prefills):
+            key = (prompt_id, initial_idx, prefill_idx)
+            if mode == "skip" and key in completed_keys:
+                continue
 
-            # Generate ALL prefill continuations for this initial response
-            all_tasks = []
-            task_info = []
-            for prefill_idx, user_prefill in enumerate(user_prefills):
-                for _ in range(num_samples):
-                    all_tasks.append(
-                        complete_user_continuation(
-                            client=client,
-                            question=question["question"],
-                            assistant_response=initial_response_raw,
-                            user_prefill=user_prefill,
-                            model=model,
-                            temperature=temperature,
-                            max_tokens=max_tokens,
-                            provider=provider,
-                            system_prompt=system_prompt,
-                        )
-                    )
-                    task_info.append(prefill_idx)
+            # Generate continuation samples
+            continuation_tasks = [
+                complete_user_continuation(
+                    client=client,
+                    question=prompt_text,
+                    assistant_response=initial_response_raw,
+                    user_prefill=user_prefill,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    provider=provider,
+                    system_prompt=system_prompt,
+                    template=template,
+                )
+                for _ in range(num_samples)
+            ]
+            continuations = await asyncio.gather(*continuation_tasks)
 
-            # Run all tasks in parallel
-            all_continuations = await asyncio.gather(*all_tasks)
+            # Convert to flat result format
+            for sample_idx, (continuation, full_prompt) in enumerate(continuations):
+                full_user_message = user_prefill + continuation if continuation else None
 
-            # Organize results back by prefill
-            prefill_results = []
-            for prefill_idx, user_prefill in enumerate(user_prefills):
-                continuations = [
-                    all_continuations[j]
-                    for j, pidx in enumerate(task_info)
-                    if pidx == prefill_idx
-                ]
-
-                full_messages = [
-                    user_prefill + cont if cont else None
-                    for cont in continuations
-                ]
-
-                prefill_results.append({
+                question_results.append({
+                    "prompt_id": prompt_id,
+                    "prompt": prompt_text,
+                    "formatted_prompt": full_prompt,
+                    "target_aspect": target_aspect,
+                    "initial_sample_idx": initial_idx,
+                    "initial_assistant_prefill": thinking_prefill,
+                    "initial_response": initial_response_raw,
+                    "initial_thinking": initial_parsed["thinking"],
+                    "initial_answer": initial_parsed["answer"],
+                    "prefill_idx": prefill_idx,
                     "user_prefill": user_prefill,
-                    "continuations": list(continuations),
-                    "full_user_messages": full_messages,
+                    "sample_idx": sample_idx,
+                    "model": model,
+                    "response": full_user_message,
+                    "continuation": continuation,
+                    "thinking": None,
+                    "usage": {},
                 })
 
-            new_initial_samples.append({
-                "sample_index": next_sample_idx + i,
-                "initial_response": {
-                    "raw": initial_response_raw,
-                    "thinking": initial_parsed["thinking"],
-                    "answer": initial_parsed["answer"],
-                },
-                "user_prefill_attacks": prefill_results,
-            })
-
-        return {
-            "mode": "append",
-            "question_id": question_id,
-            "new_initial_samples": new_initial_samples,
-        }
-    else:
-        # Generate multiple initial responses
-        initial_response_tasks = [
-            get_initial_response(
-                client=client,
-                question=question["question"],
-                model=model,
-                temperature=temperature,
-                max_tokens=initial_max_tokens,
-                provider=provider,
-                system_prompt=system_prompt,
-            )
-            for _ in range(num_initial_samples)
-        ]
-
-        initial_responses_raw = await asyncio.gather(*initial_response_tasks)
-
-        # Check if any failed
-        if any(resp is None for resp in initial_responses_raw):
-            return None
-
-        # Process each initial response
-        initial_samples = []
-        for sample_idx, initial_response_raw in enumerate(initial_responses_raw):
-            initial_parsed = parse_response(initial_response_raw)
-
-            # Generate ALL prefill continuations for this initial response
-            all_tasks = []
-            task_info = []
-            for prefill_idx, user_prefill in enumerate(user_prefills):
-                for _ in range(num_samples):
-                    all_tasks.append(
-                        complete_user_continuation(
-                            client=client,
-                            question=question["question"],
-                            assistant_response=initial_response_raw,
-                            user_prefill=user_prefill,
-                            model=model,
-                            temperature=temperature,
-                            max_tokens=max_tokens,
-                            provider=provider,
-                            system_prompt=system_prompt,
-                        )
-                    )
-                    task_info.append(prefill_idx)
-
-            # Run all tasks in parallel
-            all_continuations = await asyncio.gather(*all_tasks)
-
-            # Organize results back by prefill
-            prefill_results = []
-            for prefill_idx, user_prefill in enumerate(user_prefills):
-                continuations = [
-                    all_continuations[i]
-                    for i, pidx in enumerate(task_info)
-                    if pidx == prefill_idx
-                ]
-
-                full_messages = [
-                    user_prefill + cont if cont else None
-                    for cont in continuations
-                ]
-
-                prefill_results.append({
-                    "user_prefill": user_prefill,
-                    "continuations": list(continuations),
-                    "full_user_messages": full_messages,
-                })
-
-            initial_samples.append({
-                "sample_index": sample_idx,
-                "initial_response": {
-                    "raw": initial_response_raw,
-                    "thinking": initial_parsed["thinking"],
-                    "answer": initial_parsed["answer"],
-                },
-                "user_prefill_attacks": prefill_results,
-            })
-
-        return {
-            "mode": "new",
-            "question_id": question_id,
-            "topic": question["topic"],
-            "subtopic": question["subtopic"],
-            "level": question["level"],
-            "question": question["question"],
-            "reference_answer": question["reference_answer"],
-            "initial_samples": initial_samples,
-        }
+    valid_count = len([r for r in question_results if r.get("response")])
+    expected_count = num_initial_samples * len(user_prefills) * num_samples
+    print(f"  ✓ Collected {valid_count}/{expected_count} responses")
+    return question_results
 
 
 async def run_evaluation(
@@ -591,11 +461,11 @@ async def run_evaluation(
         user_prefills_path: Path to user prefills JSON file
         output_path: Path to save results
         temperature: Sampling temperature
-        model: OpenRouter model identifier (should be qwen/qwen3-8b, qwen/qwen3-14b, or qwen/qwen3-32b)
+        model: OpenRouter model identifier
         num_samples: Number of continuations per prefill
         max_tokens: Maximum tokens to generate for user continuations
         provider: OpenRouter provider to use
-        mode: How to handle existing results: "skip" (default), "overwrite", or "append"
+        mode: How to handle existing results: "skip" (default) or "overwrite"
         concurrency: Maximum number of concurrent API requests (default: 20)
         max_concurrent_questions: Maximum number of questions to process concurrently (default: 3)
         system_prompt: System prompt for the model
@@ -606,10 +476,14 @@ async def run_evaluation(
 
     load_dotenv()
 
+    # Get the chat template (auto-detect from model name)
+    template, detected_template_name = get_template_for_model(model)
+    thinking_prefill = get_thinking_suppression_prefill(template)
+
     print(f"Using model: {model}")
-    print(f"Using raw completions API with Qwen3 chat template")
+    print(f"Using raw completions API with '{detected_template_name}' chat template")
     if system_prompt:
-        print(f"System prompt: {system_prompt}")
+        print(f"System prompt: {system_prompt[:50]}...")
     else:
         print("No system prompt")
     if provider:
@@ -627,42 +501,49 @@ async def run_evaluation(
     print(f"Loaded {len(questions)} questions")
     print(f"Loaded {len(user_prefills)} user prefills")
 
+    # Build config object
+    config = {
+        "model": model,
+        "prompts_csv": questions_path,
+        "user_prefills_path": user_prefills_path,
+        "output_dir": os.path.dirname(output_path) or ".",
+        "n_samples": num_samples,
+        "num_initial_samples": num_initial_samples,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "initial_max_tokens": initial_max_tokens,
+        "max_concurrent": max_concurrent_questions,
+        "use_chat_api": False,
+        "system_prompt": system_prompt,
+        "provider": provider,
+        "template": detected_template_name,
+        "assistant_prefill": thinking_prefill,
+    }
+
     # Load existing progress
-    results, completed_ids, id_to_index = load_existing_results(output_path)
+    results, completed_keys = load_existing_results(output_path, mode, num_samples)
 
-    # Determine actual output path based on mode
-    actual_output_path = output_path
     if mode == "overwrite":
-        print(f"Mode: overwrite - will regenerate all {len(questions)} questions")
+        print(f"Mode: overwrite - will regenerate all items")
         results = []
-        completed_ids = set()
-        id_to_index = {}
-    elif mode == "append":
-        # For append mode, create a new numbered file
-        actual_output_path = get_next_numbered_filename(output_path)
-        print(f"Mode: append - will add {num_samples} continuations to existing questions")
-        print(f"Results will be saved to: {actual_output_path}")
+        completed_keys = set()
     else:  # skip
-        if completed_ids:
-            print(f"Mode: skip - {len(completed_ids)} questions already completed, skipping them")
+        if completed_keys:
+            print(f"Mode: skip - {len(completed_keys)} items already completed, skipping them")
 
-    # Determine questions to process
-    if mode == "skip":
-        remaining = [q for q in questions if q["question_id"] not in completed_ids]
-    else:
-        remaining = questions
-
-    print(f"Remaining: {len(remaining)} questions to process")
+    overall_start = time.time()
 
     async with httpx.AsyncClient(timeout=300) as client:
         # Process questions in batches for better parallelism
         batch_size = max_concurrent_questions
-        for batch_start in range(0, len(remaining), batch_size):
-            batch = remaining[batch_start:batch_start + batch_size]
+        for batch_start in range(0, len(questions), batch_size):
+            batch = questions[batch_start:batch_start + batch_size]
 
             print(f"\n{'='*60}")
-            print(f"Processing batch {batch_start//batch_size + 1}/{(len(remaining) + batch_size - 1)//batch_size}")
+            print(f"Processing batch {batch_start//batch_size + 1}/{(len(questions) + batch_size - 1)//batch_size}")
             print(f"{'='*60}")
+
+            batch_start_time = time.time()
 
             # Process batch concurrently
             batch_tasks = [
@@ -678,52 +559,33 @@ async def run_evaluation(
                     system_prompt=system_prompt,
                     initial_max_tokens=initial_max_tokens,
                     mode=mode,
-                    completed_ids=completed_ids,
-                    id_to_index=id_to_index,
-                    existing_results=results,
+                    completed_keys=completed_keys,
                     num_initial_samples=num_initial_samples,
+                    item_num=batch_start + i + 1,
+                    total_items=len(questions),
+                    template=template,
                 )
-                for q in batch
+                for i, q in enumerate(batch)
             ]
-            batch_results = await asyncio.gather(*batch_tasks)
+            batch_question_results = await asyncio.gather(*batch_tasks)
 
-            # Merge results from batch
-            for result in batch_results:
-                if result is None:
-                    continue
+            batch_duration = time.time() - batch_start_time
+            total_elapsed = time.time() - overall_start
 
-                if result["mode"] == "append":
-                    # Append new initial samples to existing result
-                    existing_idx = id_to_index[result["question_id"]]
-                    existing_result = results[existing_idx]
+            # Flatten batch results and merge
+            flat_batch = [r for question_results in batch_question_results for r in question_results]
+            results = merge_results(results, flat_batch)
+            save_results(results, config, output_path)
 
-                    # Handle both old and new result formats
-                    if "initial_samples" not in existing_result:
-                        # Old format: single initial_response - convert to new format first
-                        old_initial_response = existing_result.pop("initial_response")
-                        old_user_prefill_attacks = existing_result.pop("user_prefill_attacks")
-                        existing_result["initial_samples"] = [{
-                            "sample_index": 0,
-                            "initial_response": old_initial_response,
-                            "user_prefill_attacks": old_user_prefill_attacks,
-                        }]
+            print(f"\n{'='*60}")
+            print(f"✓ BATCH COMPLETE")
+            print(f"  Batch time: {batch_duration:.1f}s")
+            print(f"  Total elapsed: {total_elapsed:.1f}s")
+            print(f"  Progress: {len(results)} samples complete")
+            print(f"  Saved to {output_path}")
+            print(f"{'='*60}")
 
-                    # Append the new initial samples to the existing list
-                    existing_result["initial_samples"].extend(result["new_initial_samples"])
-                else:
-                    # Add new result
-                    results.append(result)
-                    # Remove mode key as it was only for internal processing
-                    del result["mode"]
-                    # Update id_to_index
-                    id_to_index[result["question_id"]] = len(results) - 1
-                    completed_ids.add(result["question_id"])
-
-            # Save progress after each batch
-            save_results(results, actual_output_path)
-            print(f"\nBatch complete. Progress saved to {actual_output_path}")
-
-    print(f"\nAll done! Results saved to {actual_output_path}")
+    print(f"\nAll done! Results saved to {output_path}")
     return results
 
 
@@ -734,32 +596,32 @@ def main():
     parser.add_argument(
         "--questions",
         type=str,
-        default="black_box/eval/prompts/finegrained_eval_questions_filtered.json",
+        default="data/dev_questions.json",
         help="Path to questions JSON file",
     )
     parser.add_argument(
         "--user-prefills",
         type=str,
-        default="black_box/prompts/user_prefills.json",
+        default="data/user_prefills.json",
         help="Path to user prefills JSON file",
     )
     parser.add_argument(
         "--output",
         type=str,
-        default="results/data/user_prefill_attack_responses.json",
-        help="Path to save collected responses",
+        default=None,
+        help="Path to save collected responses (default: results/<model>_user_prefill_<timestamp>.json)",
     )
     parser.add_argument(
         "--temperature",
         type=float,
-        default=0.7,
+        default=1.0,
         help="Sampling temperature for the model",
     )
     parser.add_argument(
         "--model",
         type=str,
         default="qwen/qwen3-32b",
-        help="OpenRouter model identifier (qwen/qwen3-8b, qwen/qwen3-14b, or qwen/qwen3-32b)",
+        help="OpenRouter model identifier",
     )
     parser.add_argument(
         "--num-samples",
@@ -770,28 +632,28 @@ def main():
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=3072,
+        default=10000,
         help="Maximum tokens to generate for user continuations",
     )
     parser.add_argument(
         "--initial-max-tokens",
         type=int,
-        default=3072,
+        default=10000,
         help="Maximum tokens to generate for initial assistant response",
     )
     parser.add_argument(
         "--provider",
         type=str,
-        default="deepinfra/fp8",
-        help="OpenRouter provider to use (default: deepinfra/fp8)",
+        default=None,
+        help="OpenRouter provider to use (e.g., deepinfra/fp8)",
     )
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["skip", "overwrite", "append"],
+        choices=["skip", "overwrite"],
         default="skip",
         help="How to handle existing results: 'skip' (default, resume from where left off), "
-             "'overwrite' (regenerate all), 'append' (add more continuations to existing questions)",
+             "'overwrite' (regenerate all)",
     )
     parser.add_argument(
         "--concurrency",
@@ -815,15 +677,23 @@ def main():
         "--num-initial-samples",
         type=int,
         default=5,
-        help="Number of times to sample the initial assistant response (default: 1)",
+        help="Number of times to sample the initial assistant response (default: 5)",
     )
 
     args = parser.parse_args()
 
+    # Generate default output path if not specified
+    output_path = args.output
+    if output_path is None:
+        model_name = args.model.replace("/", "_").replace("-", "_")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = f"results/{model_name}_user_prefill_{timestamp}.json"
+        os.makedirs("results", exist_ok=True)
+
     asyncio.run(run_evaluation(
         questions_path=args.questions,
         user_prefills_path=args.user_prefills,
-        output_path=args.output,
+        output_path=output_path,
         temperature=args.temperature,
         model=args.model,
         num_samples=args.num_samples,

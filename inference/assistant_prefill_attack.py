@@ -1,7 +1,7 @@
 """
 Prefill attack evaluation script using OpenRouter raw completions API.
 Forces the model to start its response with a specific prefix to influence the answer.
-Uses raw completions API with manual chat template to prefill assistant messages.
+Uses raw completions API with configurable chat template to prefill assistant messages.
 
 Supports two modes:
 - Standard prefills: Uses standard_prefills.json with thinking_prefills (wrapped in <think> tags)
@@ -13,6 +13,8 @@ import json
 import argparse
 import asyncio
 import os
+import time
+from datetime import datetime
 import httpx
 from dotenv import load_dotenv
 
@@ -22,11 +24,38 @@ _semaphore: asyncio.Semaphore | None = None
 # OpenRouter completions API endpoint
 API_URL = "https://openrouter.ai/api/v1/completions"
 
-# Qwen3 chat template tokens (default)
-QWEN3_TEMPLATE = {
-    "im_start": "<|im_start|>",
-    "im_end": "<|im_end|>",
+# Chat templates for different model families
+TEMPLATES = {
+    "chatml": {  # Qwen, DeepSeek
+        "system_start": "<|im_start|>system\n",
+        "system_end": "<|im_end|>\n",
+        "user_start": "<|im_start|>user\n",
+        "user_end": "<|im_end|>\n",
+        "assistant_start": "<|im_start|>assistant\n",
+        "assistant_end": "<|im_end|>\n",
+        "think_start": "<think>",
+        "think_end": "</think>",
+    },
+    "llama3": {  # Llama 3
+        "bos": "<|begin_of_text|>",
+        "system_start": "<|start_header_id|>system<|end_header_id|>\n\n",
+        "system_end": "<|eot_id|>",
+        "user_start": "<|start_header_id|>user<|end_header_id|>\n\n",
+        "user_end": "<|eot_id|>",
+        "assistant_start": "<|start_header_id|>assistant<|end_header_id|>\n\n",
+        "assistant_end": "<|eot_id|>",
+        "think_start": "<think>",
+        "think_end": "</think>",
+    },
 }
+
+
+def get_template_for_model(model_name: str) -> tuple[dict, str]:
+    """Get template based on model name. Returns (template_dict, template_name)."""
+    model_lower = model_name.lower()
+    if "llama" in model_lower and "3" in model_lower:
+        return TEMPLATES["llama3"], "llama3"
+    return TEMPLATES["chatml"], "chatml"
 
 
 def build_assistant_prefill_prompt(
@@ -37,131 +66,46 @@ def build_assistant_prefill_prompt(
 ) -> str:
     """Build a prompt for assistant response generation with prefill.
 
-    Format (with system prompt):
-    <|im_start|>system
-    {system_prompt}<|im_end|>
-    <|im_start|>user
-    {question}<|im_end|>
-    <|im_start|>assistant
-    {prefill}
-
-    Format (without system prompt):
-    <|im_start|>user
-    {question}<|im_end|>
-    <|im_start|>assistant
-    {prefill}
-
-    Note: NO <|im_end|> after prefill - model continues from the prefill.
+    Note: NO end token after prefill - model continues from the prefill.
     """
-    t = template or QWEN3_TEMPLATE
+    t = template or TEMPLATES["chatml"]
     parts = []
+    if t.get("bos"):
+        parts.append(t["bos"])
     if system_prompt:
-        parts.append(f"{t['im_start']}system\n{system_prompt}{t['im_end']}")
-    parts.append(f"{t['im_start']}user\n{question}{t['im_end']}")
-    parts.append(f"{t['im_start']}assistant\n{prefill}")
-    return "\n".join(parts)
+        parts.append(f"{t['system_start']}{system_prompt}{t['system_end']}")
+    parts.append(f"{t['user_start']}{question}{t['user_end']}")
+    parts.append(f"{t['assistant_start']}{prefill}")
+    return "".join(parts)
 
 
-def load_prefills(json_path: str) -> dict:
-    """Load prefills from a JSON file with the same structure as questions.
-
-    Returns a nested dict: {topic: {subtopic: [{"level": ..., "question": ..., "prefill": ...}]}}
-    """
-    with open(json_path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def match_prefills_to_questions(questions: list, prefills_data: dict) -> list:
-    """Match prefills from prefills_data to questions based on topic, subtopic, and index.
-
-    Modifies questions in-place to add 'prefill' field.
-    Returns the modified questions list.
-    """
-    # Build a lookup map: (topic, subtopic, level) -> prefill_text
-    prefill_map = {}
-    for topic, subtopics in prefills_data.items():
-        if topic == "metadata":
-            continue
-        for subtopic, prefill_list in subtopics.items():
-            for item in prefill_list:
-                key = (topic, subtopic, item.get("level"))
-                prefill_map[key] = item.get("prefill", "")
-
-    # Match prefills to questions
-    for q in questions:
-        key = (q.get("topic"), q.get("subtopic"), q.get("level"))
-        if key in prefill_map:
-            q["prefill"] = prefill_map[key]
-        else:
-            q["prefill"] = ""
-
-    return questions
-
-
-def load_questions(json_path: str, prefills_path: str | None = None) -> list:
+def load_questions(json_path: str) -> list:
     """Load questions from the evaluation JSON file.
 
-    Supports two formats:
-    1. Simple format: {"category": [{"question_id": ..., "question": ..., "answer": ...}]}
-    2. Finegrained format: {"metadata": ..., "topic": {"subtopic": [{"level": ..., "question": ..., "expected_answer": ...}]}}
+    Supports format: [{"prompt_id": ..., "question": ..., "topic": ..., "level": ...}]
 
-    If prefills_path is provided, loads prefills from that file and matches them to questions.
-
-    Returns a flat list of question dicts with normalized fields.
+    Returns a flat list of question dicts.
     """
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    
+
+    # Handle list format (dev_questions.json style)
+    if isinstance(data, list):
+        return data
+
+    # Legacy: handle dict formats
     questions = []
-    
-    # Check if it's the finegrained format (has nested subtopics with "level" field)
-    is_finegrained = False
     for key, value in data.items():
         if key == "metadata":
             continue
-        if isinstance(value, dict):
-            for subkey, subvalue in value.items():
-                if isinstance(subvalue, list) and subvalue and "level" in subvalue[0]:
-                    is_finegrained = True
-                    break
-        if is_finegrained:
-            break
-    
-    if is_finegrained:
-        # Finegrained format: topic > subtopic > questions
-        for topic, subtopics in data.items():
-            if topic == "metadata":
-                continue
-            for subtopic, question_list in subtopics.items():
-                for i, q in enumerate(question_list):
-                    question_id = f"{topic}_{subtopic}_{q.get('level', i)}"
-                    questions.append({
-                        "question_id": question_id,
-                        "topic": topic,
-                        "subtopic": subtopic,
-                        "level": q.get("level"),
-                        "question": q["question"],
-                        "reference_answer": q.get("expected_answer", q.get("answer", "")),
-                    })
-    else:
-        # Simple format: category > questions
-        for category, question_list in data.items():
-            for q in question_list:
+        if isinstance(value, list):
+            for q in value:
                 questions.append({
-                    "question_id": q.get("question_id", ""),
-                    "topic": category,
-                    "subtopic": None,
-                    "level": None,
+                    "prompt_id": q.get("prompt_id", q.get("question_id", "")),
                     "question": q["question"],
-                    "reference_answer": q.get("answer", q.get("expected_answer", "")),
-                    "prefill": q.get("prefill", ""),  # For custom prefills
+                    "topic": q.get("topic", key),
+                    "level": q.get("level"),
                 })
-
-    # If prefills_path provided, load and match prefills
-    if prefills_path:
-        prefills_data = load_prefills(prefills_path)
-        questions = match_prefills_to_questions(questions, prefills_data)
-
     return questions
 
 
@@ -171,49 +115,47 @@ def load_standard_prefills(json_path: str) -> dict:
         return json.load(f)
 
 
-def format_thinking_prefill(prefill_text: str, think_start: str = "<think>") -> str:
+def format_thinking_prefill(prefill_text: str, template: dict) -> str:
     """Format a thinking prefill with thinking tokens.
-    
+
     The prefill starts with <think> and the content, allowing the model
     to continue its thinking process.
     """
+    think_start = template.get("think_start", "<think>")
     return f"{think_start}{prefill_text}"
 
 
-def format_answer_prefill(
-    prefill_text: str, 
-    think_start: str = "<think>", 
-    think_end: str = "</think>"
-) -> str:
+def format_answer_prefill(prefill_text: str, template: dict) -> str:
     """Format an answer prefill that skips the thinking phase.
-    
+
     Uses empty thinking tags to skip thinking, then starts with the answer prefill.
     """
+    think_start = template.get("think_start", "<think>")
+    think_end = template.get("think_end", "</think>")
     return f"{think_start}{think_end}{prefill_text}"
 
 
 def get_formatted_prefills(
     standard_prefills: dict,
     prefill_type: str,
-    think_start: str = "<think>",
-    think_end: str = "</think>",
+    template: dict,
 ) -> list[tuple[str, str, str]]:
     """Get formatted prefills based on the selected type.
-    
+
     Returns list of tuples: (formatted_prefill, original_text, prefill_type)
     """
     prefills = []
-    
+
     if prefill_type in ("thinking", "both"):
         for text in standard_prefills.get("thinking_prefills", []):
-            formatted = format_thinking_prefill(text, think_start)
+            formatted = format_thinking_prefill(text, template)
             prefills.append((formatted, text, "thinking"))
-    
+
     if prefill_type in ("answer", "both"):
         for text in standard_prefills.get("answer_prefills", []):
-            formatted = format_answer_prefill(text, think_start, think_end)
+            formatted = format_answer_prefill(text, template)
             prefills.append((formatted, text, "answer"))
-    
+
     return prefills
 
 
@@ -228,13 +170,13 @@ async def make_completions_request(
 ) -> str | None:
     """Make a raw completions API request with retry logic."""
     global _semaphore
-    
+
     api_key = os.environ.get("OPENROUTER_API_KEY")
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    
+
     payload = {
         "model": model,
         "prompt": prompt,
@@ -245,7 +187,7 @@ async def make_completions_request(
     }
     if provider:
         payload["provider"] = {"only": [provider]}
-    
+
     async def do_request():
         for attempt in range(max_retries):
             try:
@@ -271,7 +213,7 @@ async def make_completions_request(
                 print(f"    API error: {e}")
                 return None
         return None
-    
+
     if _semaphore:
         async with _semaphore:
             return await do_request()
@@ -290,11 +232,13 @@ async def complete_with_prefill(
     system_prompt: str | None = None,
     template: dict | None = None,
     debug: bool = False,
-) -> str | None:
+) -> tuple[str | None, str]:
     """Call OpenRouter raw completions API with assistant prefill.
-    
+
     The prompt is constructed to end mid-assistant-turn with the prefill,
     so the model continues from where the prefill left off.
+
+    Returns (completion, formatted_prompt).
     """
     prompt = build_assistant_prefill_prompt(
         question=question,
@@ -308,7 +252,7 @@ async def complete_with_prefill(
         print(f"{'='*60}")
         print(repr(prompt))
         print(f"{'='*60}\n")
-    return await make_completions_request(
+    completion = await make_completions_request(
         client=client,
         prompt=prompt,
         model=model,
@@ -316,79 +260,59 @@ async def complete_with_prefill(
         max_tokens=max_tokens,
         provider=provider,
     )
+    return completion, prompt
 
 
-def load_existing_results(output_path: str) -> tuple[dict, set, dict]:
+def load_existing_results(output_path: str, mode: str = "skip", num_samples: int = 10) -> tuple[list, set]:
     """Load existing results from output file if it exists.
-    
-    Returns (results_dict, set_of_completed_ids, id_to_item_map).
-    The IDs are either 'item_id' (for standard prefills) or 'question_id' (for custom prefills).
-    The id_to_item_map maps IDs to (category, index) for finding items to append to.
+
+    Returns (results_list, set_of_completed_keys).
+    Keys are (prompt_id, prefill_type, prefill_idx) tuples.
     """
-    if not os.path.exists(output_path):
-        return {}, set(), {}
-    
+    if mode == "overwrite" or not os.path.exists(output_path):
+        return [], set()
+
     try:
         with open(output_path, "r", encoding="utf-8") as f:
-            results = json.load(f)
-        completed_ids = set()
-        id_to_item = {}  # Maps ID to (category, index) for appending
-        for category, items in results.items():
-            for idx, item in enumerate(items):
-                # Support both item_id (standard prefills) and question_id (custom prefills)
-                if "item_id" in item:
-                    item_id = item["item_id"]
-                else:
-                    item_id = item["question_id"]
-                completed_ids.add(item_id)
-                id_to_item[item_id] = (category, idx)
-        return results, completed_ids, id_to_item
+            data = json.load(f)
+        results = data.get("results", [])
+        # Count samples per (prompt_id, prefill_type, prefill_idx)
+        key_counts = {}
+        for r in results:
+            key = (r.get("prompt_id"), r.get("prefill_type"), r.get("prefill_idx"))
+            if r.get("response") is not None:
+                key_counts[key] = key_counts.get(key, 0) + 1
+        # Only consider complete if we have all samples
+        completed_keys = {key for key, count in key_counts.items() if count >= num_samples}
+        return results, completed_keys
     except (json.JSONDecodeError, KeyError) as e:
         print(f"Warning: Could not load existing results: {e}")
-        return {}, set(), {}
+        return [], set()
 
 
-def save_results(results: dict, output_path: str):
-    """Save results to file."""
+def save_results(results: list, config: dict, output_path: str):
+    """Save results to file with config."""
+    output = {"config": config, "results": results}
     with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
+        json.dump(output, f, indent=2, ensure_ascii=False)
 
 
-async def generate_single_completion(
-    client: httpx.AsyncClient,
-    question: str,
-    prefill: str,
-    model: str,
-    temperature: float,
-    max_tokens: int,
-    provider: str | None,
-    system_prompt: str | None = None,
-    template: dict | None = None,
-    debug: bool = False,
-) -> str | None:
-    """Generate a single completion with prefill and prepend the prefill to the response."""
-    completion = await complete_with_prefill(
-        client=client,
-        question=question,
-        prefill=prefill,
-        model=model,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        provider=provider,
-        system_prompt=system_prompt,
-        template=template,
-        debug=debug,
-    )
-    if completion is not None:
-        # Prepend prefill to show the full response including the forced prefix
-        return prefill + completion
-    return None
+def merge_results(existing: list, new_results: list) -> list:
+    """Merge new results into existing, replacing entries with matching keys."""
+    results_by_key = {
+        (r["prompt_id"], r.get("prefill_type"), r.get("prefill_idx"), r["sample_idx"]): r
+        for r in existing
+    }
+    for r in new_results:
+        key = (r["prompt_id"], r.get("prefill_type"), r.get("prefill_idx"), r["sample_idx"])
+        results_by_key[key] = r
+    return list(results_by_key.values())
 
 
 async def process_single_question_with_prefills(
     client: httpx.AsyncClient,
     question: dict,
-    formatted_prefills: list[tuple[str, str, str]] | None,
+    formatted_prefills: list[tuple[str, str, str]],
     model: str,
     temperature: float,
     max_tokens: int,
@@ -397,80 +321,38 @@ async def process_single_question_with_prefills(
     system_prompt: str | None,
     template: dict | None,
     mode: str,
-    completed_ids: set,
-    id_to_item: dict,
-    use_standard_prefills: bool,
+    completed_keys: set,
     debug: bool,
     item_num: int,
     total_items: int,
-) -> tuple[str, list[dict]]:
-    """Process a single question with all its prefills."""
-    category = question["topic"]
+) -> list[dict]:
+    """Process a single question with all its prefills. Returns flat list of results."""
+    prompt_id = question.get("prompt_id", "")
+    prompt_text = question["question"]
+    topic_info = question.get("topic", "unknown")
+    level = question.get("level")
+    if level:
+        topic_info += f" [{level}]"
+
     question_results = []
 
-    if use_standard_prefills:
-        # Process each standard prefill for this question
-        for prefill_idx, (formatted_prefill, original_text, ptype) in enumerate(formatted_prefills):
-            item_id = f"{question['question_id']}_{ptype}_{prefill_idx}"
+    # Process each standard prefill for this question
+    for prefill_idx, (formatted_prefill, original_text, ptype) in enumerate(formatted_prefills):
+        key = (prompt_id, ptype, prefill_idx)
 
-            if mode == "skip" and item_id in completed_ids:
-                continue
+        if mode == "skip" and key in completed_keys:
+            continue
 
-            # Generate all responses in parallel for this question+prefill
-            first_debug = debug and item_num == 1
-            tasks = [
-                generate_single_completion(
-                    client=client,
-                    question=question["question"],
-                    prefill=formatted_prefill,
-                    model=model,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    provider=provider,
-                    system_prompt=system_prompt,
-                    template=template,
-                    debug=first_debug and i == 0,
-                )
-                for i in range(num_samples)
-            ]
-            responses = await asyncio.gather(*tasks)
+        print(f"\n[{item_num}/{total_items}] Question: {prompt_text[:60]}...")
+        print(f"  Prefill [{ptype}]: {original_text[:40]}...")
 
-            if mode == "append" and item_id in id_to_item:
-                # Append to existing item (handled later)
-                question_results.append({
-                    "mode": "append",
-                    "item_id": item_id,
-                    "responses": responses,
-                })
-            else:
-                # Create new item
-                question_results.append({
-                    "mode": "new",
-                    "item_id": item_id,
-                    "question_id": question["question_id"],
-                    "topic": question["topic"],
-                    "subtopic": question.get("subtopic"),
-                    "level": question.get("level"),
-                    "question": question["question"],
-                    "reference_answer": question.get("reference_answer", ""),
-                    "prefill_type": ptype,
-                    "prefill_original": original_text,
-                    "prefill_formatted": formatted_prefill,
-                    "model_responses": list(responses),
-                })
-    else:
-        # Custom per-question prefill
-        question_id = question["question_id"]
-
-        if mode == "skip" and question_id in completed_ids:
-            return category, []
-
-        first_debug = debug and item_num == 1
+        # Generate all responses in parallel for this question+prefill
+        first_debug = debug and item_num == 1 and prefill_idx == 0
         tasks = [
-            generate_single_completion(
+            complete_with_prefill(
                 client=client,
-                question=question["question"],
-                prefill=question.get("prefill", ""),
+                question=prompt_text,
+                prefill=formatted_prefill,
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -483,26 +365,34 @@ async def process_single_question_with_prefills(
         ]
         responses = await asyncio.gather(*tasks)
 
-        if mode == "append" and question_id in id_to_item:
+        # Build target_aspect from topic
+        target_aspect = f"unknown/{topic_info}/unknown"
+
+        # Convert to flat result format
+        for idx, (completion, full_prompt) in enumerate(responses):
+            # Prepend prefill to show the full response including the forced prefix
+            full_response = formatted_prefill + completion if completion else None
+
             question_results.append({
-                "mode": "append",
-                "item_id": question_id,
-                "responses": responses,
-            })
-        else:
-            question_results.append({
-                "mode": "new",
-                "question_id": question_id,
-                "topic": question["topic"],
-                "subtopic": question.get("subtopic"),
-                "level": question.get("level"),
-                "question": question["question"],
-                "reference_answer": question.get("reference_answer", ""),
-                "prefill": question.get("prefill", ""),
-                "model_responses": list(responses),
+                "prompt_id": prompt_id,
+                "prompt": prompt_text,
+                "formatted_prompt": full_prompt,
+                "target_aspect": target_aspect,
+                "prefill_type": ptype,
+                "prefill_idx": prefill_idx,
+                "prefill_original": original_text,
+                "prefill_formatted": formatted_prefill,
+                "sample_idx": idx,
+                "model": model,
+                "response": full_response,
+                "thinking": None,  # Raw completions don't separate thinking
+                "usage": {},
             })
 
-    return category, question_results
+        valid_count = len([r for c, _ in responses if c])
+        print(f"  ✓ Collected {valid_count}/{num_samples} responses")
+
+    return question_results
 
 
 async def run_evaluation(
@@ -513,16 +403,12 @@ async def run_evaluation(
     num_samples: int,
     max_tokens: int,
     provider: str | None,
-    standard_prefills_path: str | None = None,
-    custom_prefills_path: str | None = None,
+    standard_prefills_path: str,
     prefill_type: str = "both",
-    think_start: str = "<think>",
-    think_end: str = "</think>",
     mode: str = "skip",
     concurrency: int = 20,
     max_concurrent_questions: int = 3,
     system_prompt: str | None = None,
-    template: dict | None = None,
     debug: bool = False,
 ):
     """Run the prefill attack evaluation.
@@ -535,26 +421,25 @@ async def run_evaluation(
         num_samples: Number of responses per question/prefill combination
         max_tokens: Maximum tokens to generate
         provider: OpenRouter provider to use
-        standard_prefills_path: Path to standard_prefills.json (if None, uses custom prefills)
-        custom_prefills_path: Path to custom prefills JSON file (used when standard_prefills_path is None)
+        standard_prefills_path: Path to standard_prefills.json
         prefill_type: Which prefill type to use: "thinking", "answer", or "both"
-        think_start: Start token for thinking (default: <think>)
-        think_end: End token for thinking (default: </think>)
-        mode: How to handle existing results: "skip" (default), "overwrite", or "append"
+        mode: How to handle existing results: "skip" (default) or "overwrite"
         concurrency: Maximum number of concurrent API requests (default: 20)
         max_concurrent_questions: Maximum number of questions to process concurrently (default: 3)
         system_prompt: System prompt for the model
-        template: Custom chat template dict with 'im_start' and 'im_end' keys
         debug: Print debug info including full prompts (only for first request)
     """
     global _semaphore
 
     load_dotenv()
 
+    # Get the chat template (auto-detect from model name)
+    template, detected_template_name = get_template_for_model(model)
+
     print(f"Using model: {model}")
-    print(f"Using raw completions API with manual chat template")
+    print(f"Using raw completions API with '{detected_template_name}' chat template")
     if system_prompt:
-        print(f"System prompt: {system_prompt}")
+        print(f"System prompt: {system_prompt[:50]}...")
     else:
         print("No system prompt")
     if provider:
@@ -565,50 +450,50 @@ async def run_evaluation(
     print(f"Concurrency limit: {concurrency} parallel requests")
     print(f"Processing up to {max_concurrent_questions} questions concurrently")
 
-    questions = load_questions(questions_path, prefills_path=custom_prefills_path)
+    questions = load_questions(questions_path)
+    standard_prefills = load_standard_prefills(standard_prefills_path)
+    formatted_prefills = get_formatted_prefills(
+        standard_prefills, prefill_type, template
+    )
 
-    # Determine prefill mode
-    use_standard_prefills = standard_prefills_path is not None
-
-    if use_standard_prefills:
-        standard_prefills = load_standard_prefills(standard_prefills_path)
-        formatted_prefills = get_formatted_prefills(
-            standard_prefills, prefill_type, think_start, think_end
-        )
-        print(f"Using standard prefills ({prefill_type}): {len(formatted_prefills)} prefills")
-        for fp, orig, ptype in formatted_prefills:
-            print(f"  [{ptype}] {orig[:60]}...")
-    else:
-        if custom_prefills_path:
-            print(f"Using custom per-question prefills from: {custom_prefills_path}")
-        else:
-            print("Using custom per-question prefills (embedded in questions file)")
-        formatted_prefills = None
+    print(f"Loaded {len(questions)} questions")
+    print(f"Using standard prefills ({prefill_type}): {len(formatted_prefills)} prefills")
+    for fp, orig, ptype in formatted_prefills:
+        print(f"  [{ptype}] {orig[:60]}...")
 
     # Count total items to process
-    total_questions = len(questions)
-    if use_standard_prefills:
-        total_items = total_questions * len(formatted_prefills)
-        print(f"Loaded {total_questions} questions × {len(formatted_prefills)} prefills = {total_items} total items")
-    else:
-        total_items = total_questions
-        print(f"Loaded {total_questions} questions")
+    total_items = len(questions) * len(formatted_prefills)
+    print(f"Total items: {len(questions)} questions × {len(formatted_prefills)} prefills = {total_items}")
+
+    # Build config object
+    config = {
+        "model": model,
+        "prompts_csv": questions_path,
+        "output_dir": os.path.dirname(output_path) or ".",
+        "n_samples": num_samples,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "max_concurrent": max_concurrent_questions,
+        "use_chat_api": False,
+        "system_prompt": system_prompt,
+        "standard_prefills_path": standard_prefills_path,
+        "prefill_type": prefill_type,
+        "provider": provider,
+        "template": detected_template_name,
+    }
 
     # Load existing progress
-    results, completed_ids, id_to_item = load_existing_results(output_path)
+    results, completed_keys = load_existing_results(output_path, mode, num_samples)
 
     if mode == "overwrite":
         print(f"Mode: overwrite - will regenerate all {total_items} items")
-        results = {}
-        completed_ids = set()
-        id_to_item = {}
-    elif mode == "append":
-        print(f"Mode: append - will add {num_samples} responses to existing items")
+        results = []
+        completed_keys = set()
     else:  # skip
-        if completed_ids:
-            print(f"Mode: skip - {len(completed_ids)} items already completed, skipping them")
+        if completed_keys:
+            print(f"Mode: skip - {len(completed_keys)} items already completed, skipping them")
 
-    item_num = 0 if mode in ("overwrite", "append") else len(completed_ids)
+    overall_start = time.time()
 
     async with httpx.AsyncClient(timeout=300) as client:
         # Process questions in batches for better parallelism
@@ -619,6 +504,8 @@ async def run_evaluation(
             print(f"\n{'='*60}")
             print(f"Processing batch {batch_start//batch_size + 1}/{(len(questions) + batch_size - 1)//batch_size}")
             print(f"{'='*60}")
+
+            batch_start_time = time.time()
 
             # Process batch concurrently
             batch_tasks = [
@@ -634,36 +521,30 @@ async def run_evaluation(
                     system_prompt=system_prompt,
                     template=template,
                     mode=mode,
-                    completed_ids=completed_ids,
-                    id_to_item=id_to_item,
-                    use_standard_prefills=use_standard_prefills,
+                    completed_keys=completed_keys,
                     debug=debug,
-                    item_num=item_num + batch_start + i,
-                    total_items=total_items,
+                    item_num=batch_start + i + 1,
+                    total_items=len(questions),
                 )
                 for i, q in enumerate(batch)
             ]
             batch_question_results = await asyncio.gather(*batch_tasks)
 
-            # Merge results from batch
-            for category, question_results in batch_question_results:
-                if category not in results:
-                    results[category] = []
+            batch_duration = time.time() - batch_start_time
+            total_elapsed = time.time() - overall_start
 
-                for result in question_results:
-                    if result["mode"] == "append":
-                        # Append to existing item
-                        cat, idx = id_to_item[result["item_id"]]
-                        results[cat][idx]["model_responses"].extend(result["responses"])
-                    else:
-                        # Add new item
-                        results[category].append(result)
-                        # Remove mode key as it was only for internal processing
-                        del result["mode"]
+            # Flatten batch results and merge
+            flat_batch = [r for question_results in batch_question_results for r in question_results]
+            results = merge_results(results, flat_batch)
+            save_results(results, config, output_path)
 
-            # Save progress after each batch
-            save_results(results, output_path)
-            print(f"\nBatch complete. Progress saved to {output_path}")
+            print(f"\n{'='*60}")
+            print(f"✓ BATCH COMPLETE")
+            print(f"  Batch time: {batch_duration:.1f}s")
+            print(f"  Total elapsed: {total_elapsed:.1f}s")
+            print(f"  Progress: {len(results)}/{total_items * num_samples} samples complete")
+            print(f"  Saved to {output_path}")
+            print(f"{'='*60}")
 
     print(f"\nAll done! Results saved to {output_path}")
     return results
@@ -676,24 +557,14 @@ def main():
     parser.add_argument(
         "--questions",
         type=str,
-        default="black_box/eval/prompts/finegrained_eval_questions_filtered.json",
+        default="data/dev_questions.json",
         help="Path to questions JSON file",
     )
     parser.add_argument(
         "--standard-prefills",
         type=str,
-        default=None,
-        help="Path to standard_prefills.json. If provided, uses standard prefills "
-             "instead of per-question prefills. Standard prefills contain thinking_prefills "
-             "(wrapped in <think> tags) and answer_prefills (skip thinking).",
-    )
-    parser.add_argument(
-        "--custom-prefills",
-        type=str,
-        default=None,
-        help="Path to custom prefills JSON file (e.g., finegrained_assistant_prefill.json). "
-             "Used when --standard-prefills is not provided. The file should have the same "
-             "structure as the questions file with 'prefill' fields.",
+        default="data/standard_prefills.json",
+        help="Path to standard_prefills.json containing thinking_prefills and answer_prefills.",
     )
     parser.add_argument(
         "--prefill-type",
@@ -706,13 +577,13 @@ def main():
     parser.add_argument(
         "--output",
         type=str,
-        default="results/data/assistant_prefill_responses.json",
-        help="Path to save collected responses",
+        default=None,
+        help="Path to save collected responses (default: results/<model>_assistant_prefill_<timestamp>.json)",
     )
     parser.add_argument(
         "--temperature",
         type=float,
-        default=0.7,
+        default=1.0,
         help="Sampling temperature for the model",
     )
     parser.add_argument(
@@ -730,22 +601,22 @@ def main():
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=1024,
+        default=10000,
         help="Maximum tokens to generate",
     )
     parser.add_argument(
         "--provider",
         type=str,
-        default="deepinfra/fp8",
-        help="OpenRouter provider to use (default: deepinfra/fp8)",
+        default=None,
+        help="OpenRouter provider to use (e.g., deepinfra/fp8)",
     )
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["skip", "overwrite", "append"],
+        choices=["skip", "overwrite"],
         default="skip",
         help="How to handle existing results: 'skip' (default, resume from where left off), "
-             "'overwrite' (regenerate all), 'append' (add more responses to existing items)",
+             "'overwrite' (regenerate all)",
     )
     parser.add_argument(
         "--concurrency",
@@ -757,19 +628,7 @@ def main():
         "--max-concurrent-questions",
         type=int,
         default=5,
-        help="Maximum number of questions to process concurrently (default: 3)",
-    )
-    parser.add_argument(
-        "--think-start",
-        type=str,
-        default="<think>",
-        help="Start token for thinking mode (default: <think>)",
-    )
-    parser.add_argument(
-        "--think-end",
-        type=str,
-        default="</think>",
-        help="End token for thinking mode (default: </think>)",
+        help="Maximum number of questions to process concurrently (default: 5)",
     )
     parser.add_argument(
         "--system-prompt",
@@ -785,19 +644,24 @@ def main():
 
     args = parser.parse_args()
 
+    # Generate default output path if not specified
+    output_path = args.output
+    if output_path is None:
+        model_name = args.model.replace("/", "_").replace("-", "_")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = f"results/{model_name}_assistant_prefill_{timestamp}.json"
+        os.makedirs("results", exist_ok=True)
+
     asyncio.run(run_evaluation(
         questions_path=args.questions,
-        output_path=args.output,
+        output_path=output_path,
         temperature=args.temperature,
         model=args.model,
         num_samples=args.num_samples,
         max_tokens=args.max_tokens,
         provider=args.provider,
         standard_prefills_path=args.standard_prefills,
-        custom_prefills_path=args.custom_prefills,
         prefill_type=args.prefill_type,
-        think_start=args.think_start,
-        think_end=args.think_end,
         mode=args.mode,
         concurrency=args.concurrency,
         max_concurrent_questions=args.max_concurrent_questions,

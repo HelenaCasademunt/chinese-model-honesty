@@ -12,7 +12,7 @@ num_samples: 5000
 output_dir: /workspace/qwen3-32b-lora-finetuned-honesty-split-personality
 
 # Training hyperparameters
-epochs: 1
+epochs: 4
 batch_size: 4
 grad_accum: 4
 lr: 1e-05

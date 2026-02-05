@@ -250,21 +250,60 @@ def reconstruct_baseline_results(
 # ============================================================================
 
 def load_user_prefill_data(input_path: str) -> List[dict]:
-    """Load user prefill attack responses from JSON file."""
-    return load_json(input_path)
+    """Load user prefill attack responses from JSON file.
+
+    Supports new format: {"config": ..., "results": [...]} with flat results.
+    Groups results by (prompt_id, initial_sample_idx, prefill_idx).
+    """
+    data = load_json(input_path)
+
+    # Check if this is the new format with "results" key
+    if isinstance(data, dict) and "results" in data:
+        results = data.get("results", [])
+        grouped = {}
+        for item in results:
+            prompt_id = item.get("prompt_id", "unknown")
+            initial_idx = item.get("initial_sample_idx", 0)
+            prefill_idx = item.get("prefill_idx", 0)
+            key = (prompt_id, initial_idx, prefill_idx)
+            if key not in grouped:
+                grouped[key] = {
+                    "question_id": prompt_id,
+                    "prompt_id": prompt_id,
+                    "question": item.get("prompt", ""),
+                    "initial_sample_idx": initial_idx,
+                    "prefill_idx": prefill_idx,
+                    "user_prefill": item.get("user_prefill", ""),
+                    "responses": [],
+                    "_format": "new"
+                }
+            grouped[key]["responses"].append(item)
+        return list(grouped.values())
+    else:
+        # Old format: list of items
+        return data
 
 
 def extract_user_prefill_responses(question_data: dict) -> List[Tuple[str, dict]]:
     """
     Extract all responses from user prefill data format.
 
-    Handles both new format (initial_samples) and old format (initial_response).
+    Supports new flat format with "response" field.
     Returns list of (response_text, response_metadata) tuples.
     """
     responses = []
 
-    if "initial_samples" in question_data:
-        # New format: multiple samples per question
+    # Check if this is the new format
+    if question_data.get("_format") == "new":
+        for resp_idx, resp_item in enumerate(question_data.get("responses", [])):
+            response_text = resp_item.get("response", "")
+            responses.append((response_text, {
+                "resp_idx": resp_idx,
+                "original": resp_item,
+                "_is_new_format": True
+            }))
+    elif "initial_samples" in question_data:
+        # Old format: multiple samples per question
         for sample_idx, sample in enumerate(question_data["initial_samples"]):
             # Initial response
             initial_resp = sample.get("initial_response", {})
@@ -313,7 +352,35 @@ def reconstruct_user_prefill_results(
     evaluated_responses: List[dict],
 ) -> dict:
     """Reconstruct user prefill results with evaluations."""
-    # Map evaluations back to original structure
+    # Check if this is the new format
+    if question_data.get("_format") == "new":
+        new_responses = []
+        for resp in evaluated_responses:
+            meta = resp["_metadata"]
+            if meta.get("_is_new_format"):
+                original = meta.get("original", {})
+                new_responses.append({
+                    **original,
+                    "evaluation": resp.get("evaluation", {})
+                })
+            else:
+                new_responses.append(resp)
+
+        # Count refusals
+        refusal_values = [r["evaluation"].get("is_refusal") for r in new_responses]
+        counts = {
+            "refusal": sum(1 for v in refusal_values if v == True),
+            "non_refusal": sum(1 for v in refusal_values if v == False),
+            "error": sum(1 for v in refusal_values if v is None)
+        }
+
+        return {
+            **{k: v for k, v in question_data.items() if k != "_format"},
+            "responses": new_responses,
+            "evaluation_summary": counts
+        }
+
+    # Map evaluations back to original structure for old formats
     eval_map = {}
     for resp in evaluated_responses:
         meta = resp["_metadata"]
@@ -322,7 +389,7 @@ def reconstruct_user_prefill_results(
         eval_map[key] = resp
 
     if "initial_samples" in question_data:
-        # New format
+        # Old format with initial_samples
         new_samples = []
         for sample_idx, sample in enumerate(question_data["initial_samples"]):
             # Initial response
@@ -385,7 +452,7 @@ def reconstruct_user_prefill_results(
             "overall_evaluation_summary": overall_summary
         }
     else:
-        # Old format
+        # Old format without initial_samples
         key = (0, "initial", None, None)
         initial_eval = eval_map.get(key, {})
         new_initial = {
@@ -441,32 +508,64 @@ def reconstruct_user_prefill_results(
 # ============================================================================
 
 def load_user_prefill_simple_data(input_path: str) -> List[dict]:
-    """Load user prefill simple attack responses from JSON file."""
-    return load_json(input_path)
+    """Load user prefill simple attack responses from JSON file.
+
+    Supports new format: {"config": ..., "results": [...]} with flat results.
+    Groups results by prompt_id.
+    """
+    data = load_json(input_path)
+
+    # Check if this is the new format with "results" key
+    if isinstance(data, dict) and "results" in data:
+        results = data.get("results", [])
+        grouped = {}
+        for item in results:
+            prompt_id = item.get("prompt_id", "unknown")
+            if prompt_id not in grouped:
+                grouped[prompt_id] = {
+                    "question_id": prompt_id,
+                    "prompt_id": prompt_id,
+                    "question": item.get("prompt", ""),
+                    "responses": [],
+                    "_format": "new"
+                }
+            grouped[prompt_id]["responses"].append(item)
+        return list(grouped.values())
+    else:
+        # Old format: list of items
+        return data
 
 
 def extract_user_prefill_simple_responses(item: dict) -> List[Tuple[str, dict]]:
     """
     Extract responses from user prefill simple attack format.
 
-    The simple attack format has:
-    - continuations: list of raw continuation texts (model continuing as user)
-    - full_user_messages: list of prefill + continuation
-
-    We evaluate the full_user_messages since that's what the model "said" as the user.
+    Supports new flat format with "response" field.
     Returns list of (response_text, response_metadata) tuples.
     """
     responses = []
-    full_messages = item.get("full_user_messages", [])
-    continuations = item.get("continuations", [])
 
-    for idx, full_msg in enumerate(full_messages):
-        if full_msg is None:
-            continue
-        responses.append((full_msg, {
-            "idx": idx,
-            "continuation": continuations[idx] if idx < len(continuations) else None,
-        }))
+    # Check if this is the new format
+    if item.get("_format") == "new":
+        for resp_idx, resp_item in enumerate(item.get("responses", [])):
+            response_text = resp_item.get("response", "")
+            responses.append((response_text, {
+                "resp_idx": resp_idx,
+                "original": resp_item,
+                "_is_new_format": True
+            }))
+    else:
+        # Old format with full_user_messages and continuations
+        full_messages = item.get("full_user_messages", [])
+        continuations = item.get("continuations", [])
+
+        for idx, full_msg in enumerate(full_messages):
+            if full_msg is None:
+                continue
+            responses.append((full_msg, {
+                "idx": idx,
+                "continuation": continuations[idx] if idx < len(continuations) else None,
+            }))
 
     return responses
 
@@ -476,7 +575,35 @@ def reconstruct_user_prefill_simple_results(
     evaluated_responses: List[dict],
 ) -> dict:
     """Reconstruct user prefill simple results with evaluations."""
-    # Build evaluated_responses list
+    # Check if this is the new format
+    if item.get("_format") == "new":
+        new_responses = []
+        for resp in evaluated_responses:
+            meta = resp["_metadata"]
+            if meta.get("_is_new_format"):
+                original = meta.get("original", {})
+                new_responses.append({
+                    **original,
+                    "evaluation": resp.get("evaluation", {})
+                })
+            else:
+                new_responses.append(resp)
+
+        # Count refusals
+        refusal_values = [r["evaluation"].get("is_refusal") for r in new_responses]
+        counts = {
+            "refusal": sum(1 for v in refusal_values if v == True),
+            "non_refusal": sum(1 for v in refusal_values if v == False),
+            "error": sum(1 for v in refusal_values if v is None)
+        }
+
+        return {
+            **{k: v for k, v in item.items() if k != "_format"},
+            "responses": new_responses,
+            "evaluation_summary": counts
+        }
+
+    # Old format
     new_responses = []
     for resp in evaluated_responses:
         meta = resp["_metadata"]
@@ -506,10 +633,38 @@ def reconstruct_user_prefill_simple_results(
 # ============================================================================
 
 def load_assistant_prefill_data(input_path: str) -> List[dict]:
-    """Load assistant prefill responses from JSON file and flatten structure."""
+    """Load assistant prefill responses from JSON file.
+
+    Supports new format: {"config": ..., "results": [...]} with flat results.
+    Groups results by (prompt_id, prefill_type, prefill_idx).
+    """
     data = load_json(input_path)
 
-    # Flatten nested structure if needed
+    # Check if this is the new format with "results" key
+    if isinstance(data, dict) and "results" in data:
+        results = data.get("results", [])
+        grouped = {}
+        for item in results:
+            prompt_id = item.get("prompt_id", "unknown")
+            prefill_type = item.get("prefill_type", "unknown")
+            prefill_idx = item.get("prefill_idx", 0)
+            key = (prompt_id, prefill_type, prefill_idx)
+            if key not in grouped:
+                grouped[key] = {
+                    "question_id": prompt_id,
+                    "prompt_id": prompt_id,
+                    "question": item.get("prompt", ""),
+                    "prefill_type": prefill_type,
+                    "prefill_idx": prefill_idx,
+                    "prefill_formatted": item.get("prefill_formatted", ""),
+                    "prefill_original": item.get("prefill_original", ""),
+                    "responses": [],
+                    "_format": "new"
+                }
+            grouped[key]["responses"].append(item)
+        return list(grouped.values())
+
+    # Flatten nested structure if needed (old format)
     items = []
     if isinstance(data, dict):
         for topic, topic_items in data.items():
@@ -538,18 +693,31 @@ def extract_assistant_prefill_responses(item: dict) -> List[Tuple[str, dict]]:
     """
     Extract responses from assistant prefill data format.
 
+    Supports new flat format with "response" field.
     Returns list of (response_text, response_metadata) tuples.
     """
     responses = []
-    prefill = item.get("prefill_formatted") or item.get("prefill") or ""
 
-    for resp_idx, full_response in enumerate(item.get("model_responses", [])):
-        continuation = extract_continuation(full_response or "", prefill)
-        responses.append((continuation, {
-            "resp_idx": resp_idx,
-            "full_response": full_response,
-            "prefill": prefill
-        }))
+    # Check if this is the new format
+    if item.get("_format") == "new":
+        for resp_idx, resp_item in enumerate(item.get("responses", [])):
+            response_text = resp_item.get("response", "")
+            responses.append((response_text, {
+                "resp_idx": resp_idx,
+                "original": resp_item,
+                "_is_new_format": True
+            }))
+    else:
+        # Old format with model_responses list
+        prefill = item.get("prefill_formatted") or item.get("prefill") or ""
+
+        for resp_idx, full_response in enumerate(item.get("model_responses", [])):
+            continuation = extract_continuation(full_response or "", prefill)
+            responses.append((continuation, {
+                "resp_idx": resp_idx,
+                "full_response": full_response,
+                "prefill": prefill
+            }))
 
     return responses
 
@@ -559,7 +727,35 @@ def reconstruct_assistant_prefill_results(
     evaluated_responses: List[dict],
 ) -> dict:
     """Reconstruct assistant prefill results with evaluations."""
-    # Build evaluated_responses list
+    # Check if this is the new format
+    if item.get("_format") == "new":
+        new_responses = []
+        for resp in evaluated_responses:
+            meta = resp["_metadata"]
+            if meta.get("_is_new_format"):
+                original = meta.get("original", {})
+                new_responses.append({
+                    **original,
+                    "evaluation": resp.get("evaluation", {})
+                })
+            else:
+                new_responses.append(resp)
+
+        # Count refusals
+        refusal_values = [r["evaluation"].get("is_refusal") for r in new_responses]
+        counts = {
+            "refusal": sum(1 for v in refusal_values if v == True),
+            "non_refusal": sum(1 for v in refusal_values if v == False),
+            "error": sum(1 for v in refusal_values if v is None)
+        }
+
+        return {
+            **{k: v for k, v in item.items() if k != "_format"},
+            "responses": new_responses,
+            "evaluation_summary": counts
+        }
+
+    # Old format
     new_responses = []
     for resp in evaluated_responses:
         meta = resp["_metadata"]
@@ -589,10 +785,32 @@ def reconstruct_assistant_prefill_results(
 # ============================================================================
 
 def load_pretrain_data(input_path: str) -> List[dict]:
-    """Load pretrain attack responses from JSON file and flatten structure."""
+    """Load pretrain attack responses from JSON file.
+
+    Supports new format: {"config": ..., "results": [...]} with flat results.
+    Groups results by prompt_id.
+    """
     data = load_json(input_path)
 
-    # Flatten nested structure if needed
+    # Check if this is the new format with "results" key
+    if isinstance(data, dict) and "results" in data:
+        results = data.get("results", [])
+        grouped = {}
+        for item in results:
+            prompt_id = item.get("prompt_id", "unknown")
+            if prompt_id not in grouped:
+                grouped[prompt_id] = {
+                    "question_id": prompt_id,
+                    "prompt_id": prompt_id,
+                    "question": item.get("prompt", ""),
+                    "censored_response": item.get("censored_response", ""),
+                    "responses": [],
+                    "_format": "new"
+                }
+            grouped[prompt_id]["responses"].append(item)
+        return list(grouped.values())
+
+    # Flatten nested structure if needed (old format)
     items = []
     if isinstance(data, dict):
         for topic, topic_items in data.items():
@@ -610,14 +828,28 @@ def extract_pretrain_responses(item: dict) -> List[Tuple[str, dict]]:
     """
     Extract responses from pretrain data format.
 
+    Supports new flat format with "response" field.
     Returns list of (response_text, response_metadata) tuples.
     """
     responses = []
-    for resp_idx, model_response in enumerate(item.get("model_responses", [])):
-        responses.append((model_response or "", {
-            "resp_idx": resp_idx,
-            "original_response": model_response
-        }))
+
+    # Check if this is the new format
+    if item.get("_format") == "new":
+        for resp_idx, resp_item in enumerate(item.get("responses", [])):
+            response_text = resp_item.get("response", "")
+            responses.append((response_text, {
+                "resp_idx": resp_idx,
+                "original": resp_item,
+                "_is_new_format": True
+            }))
+    else:
+        # Old format with model_responses list
+        for resp_idx, model_response in enumerate(item.get("model_responses", [])):
+            responses.append((model_response or "", {
+                "resp_idx": resp_idx,
+                "original_response": model_response
+            }))
+
     return responses
 
 
@@ -626,7 +858,35 @@ def reconstruct_pretrain_results(
     evaluated_responses: List[dict],
 ) -> dict:
     """Reconstruct pretrain results with evaluations."""
-    # Build evaluated_responses list
+    # Check if this is the new format
+    if item.get("_format") == "new":
+        new_responses = []
+        for resp in evaluated_responses:
+            meta = resp["_metadata"]
+            if meta.get("_is_new_format"):
+                original = meta.get("original", {})
+                new_responses.append({
+                    **original,
+                    "evaluation": resp.get("evaluation", {})
+                })
+            else:
+                new_responses.append(resp)
+
+        # Count refusals
+        refusal_values = [r["evaluation"].get("is_refusal") for r in new_responses]
+        counts = {
+            "refusal": sum(1 for v in refusal_values if v == True),
+            "non_refusal": sum(1 for v in refusal_values if v == False),
+            "error": sum(1 for v in refusal_values if v is None)
+        }
+
+        return {
+            **{k: v for k, v in item.items() if k != "_format"},
+            "responses": new_responses,
+            "evaluation_summary": counts
+        }
+
+    # Old format
     new_responses = []
     for resp in evaluated_responses:
         meta = resp["_metadata"]

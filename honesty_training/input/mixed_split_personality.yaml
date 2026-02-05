@@ -6,7 +6,7 @@ followup_data: honesty_training/data/followup_split_personality_qwen3.jsonl
 
 # Dataset settings
 dataset_mode: mixed  # choices: goals, followup, mixed
-num_samples: 5000
+num_samples: 2000
 
 # Output
 output_dir: /workspace/qwen3-32b-lora-finetuned-mixed-split-personality

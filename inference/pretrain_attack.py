@@ -21,6 +21,8 @@ import json
 import argparse
 import asyncio
 import os
+import time
+from datetime import datetime
 import httpx
 from dotenv import load_dotenv
 
@@ -55,74 +57,63 @@ Unbiased AI:"""
 def load_questions(json_path: str) -> list:
     """Load questions from the evaluation JSON file.
 
-    Supports finegrained format: {"metadata": ..., "topic": {"subtopic": [{"level": ..., "question": ..., "expected_answer": ...}]}}
+    Supports format: [{"prompt_id": ..., "question": ..., "topic": ..., "level": ...}]
 
-    Returns a flat list of question dicts with normalized fields.
+    Returns a flat list of question dicts.
     """
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    questions = []
+    # Handle list format (dev_questions.json style)
+    if isinstance(data, list):
+        return data
 
-    # Check if it's the finegrained format (has nested subtopics with "level" field)
-    is_finegrained = False
+    # Legacy: handle dict formats
+    questions = []
     for key, value in data.items():
         if key == "metadata":
             continue
-        if isinstance(value, dict):
-            for subkey, subvalue in value.items():
-                if isinstance(subvalue, list) and subvalue and "level" in subvalue[0]:
-                    is_finegrained = True
-                    break
-        if is_finegrained:
-            break
-
-    if is_finegrained:
-        # Finegrained format: topic > subtopic > questions
-        for topic, subtopics in data.items():
-            if topic == "metadata":
-                continue
-            for subtopic, question_list in subtopics.items():
-                for i, q in enumerate(question_list):
-                    question_id = f"{topic}_{subtopic}_{q.get('level', i)}"
-                    questions.append({
-                        "question_id": question_id,
-                        "topic": topic,
-                        "subtopic": subtopic,
-                        "level": q.get("level"),
-                        "question": q["question"],
-                        "reference_answer": q.get("expected_answer", q.get("answer", "")),
-                    })
-    else:
-        # Simple format: category > questions
-        for category, question_list in data.items():
-            for q in question_list:
+        if isinstance(value, list):
+            for q in value:
                 questions.append({
-                    "question_id": q.get("question_id", ""),
-                    "topic": category,
-                    "subtopic": None,
-                    "level": None,
+                    "prompt_id": q.get("prompt_id", q.get("question_id", "")),
                     "question": q["question"],
-                    "reference_answer": q.get("answer", q.get("expected_answer", "")),
+                    "topic": q.get("topic", key),
+                    "level": q.get("level"),
                 })
-
     return questions
 
 
 def load_baseline_responses(json_path: str) -> dict:
     """Load baseline responses from JSON file.
 
-    Returns dict mapping question_id to list of responses.
+    Supports new format: {"config": ..., "results": [{"prompt_id": ..., "response": ...}]}
+
+    Returns dict mapping prompt_id to list of responses.
     """
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    # Create a mapping from question_id to responses
+    # Handle new format with config and results
+    if "results" in data:
+        results = data["results"]
+    elif isinstance(data, list):
+        results = data
+    else:
+        # Legacy format
+        results = []
+        for item in data.values():
+            if isinstance(item, list):
+                results.extend(item)
+
+    # Create a mapping from prompt_id to responses
     response_map = {}
-    for item in data:
-        question_id = item.get("question_id")
-        if question_id:
-            response_map[question_id] = item.get("model_responses", [])
+    for item in results:
+        prompt_id = item.get("prompt_id")
+        if prompt_id:
+            if prompt_id not in response_map:
+                response_map[prompt_id] = []
+            response_map[prompt_id].append(item.get("response", ""))
 
     return response_map
 
@@ -157,12 +148,11 @@ def is_refusal_or_evasion(response_text: str) -> bool:
 def get_first_incorrect_response(responses: list) -> str | None:
     """Get the first incorrect (refusal/evasion) response from a list.
 
-    Returns the answer text, or None if no incorrect responses found.
+    Returns the response text, or None if no incorrect responses found.
     """
     for response in responses:
-        answer = response.get("answer", "")
-        if is_refusal_or_evasion(answer):
-            return answer
+        if is_refusal_or_evasion(response):
+            return response
 
     return None
 
@@ -176,10 +166,10 @@ def match_questions_with_baseline(questions: list, baseline_map: dict) -> list:
     matched = []
 
     for q in questions:
-        question_id = q["question_id"]
+        prompt_id = q.get("prompt_id")
 
-        if question_id in baseline_map:
-            responses = baseline_map[question_id]
+        if prompt_id in baseline_map:
+            responses = baseline_map[prompt_id]
             incorrect_response = get_first_incorrect_response(responses)
 
             if incorrect_response:
@@ -262,10 +252,11 @@ async def complete_with_pretrain_attack(
     max_tokens: int,
     provider: str | None = None,
     debug: bool = False,
-) -> str | None:
+) -> tuple[str | None, str]:
     """Call OpenRouter raw completions API with pretrain attack format.
 
     The prompt presents a censored AI response, then asks for an unbiased response.
+    Returns (completion, formatted_prompt).
     """
     prompt = build_pretrain_attack_prompt(
         user_prompt=user_prompt,
@@ -277,7 +268,7 @@ async def complete_with_pretrain_attack(
         print(f"{'='*60}")
         print(prompt)
         print(f"{'='*60}\n")
-    return await make_completions_request(
+    completion = await make_completions_request(
         client=client,
         prompt=prompt,
         model=model,
@@ -285,59 +276,48 @@ async def complete_with_pretrain_attack(
         max_tokens=max_tokens,
         provider=provider,
     )
+    return completion, prompt
 
 
-def load_existing_results(output_path: str) -> tuple[dict, set, dict]:
+def load_existing_results(output_path: str, mode: str = "skip", num_samples: int = 10) -> tuple[list, set]:
     """Load existing results from output file if it exists.
 
-    Returns (results_dict, set_of_completed_ids, id_to_item_map).
+    Returns (results_list, set_of_completed_prompt_ids).
     """
-    if not os.path.exists(output_path):
-        return {}, set(), {}
+    if mode == "overwrite" or not os.path.exists(output_path):
+        return [], set()
 
     try:
         with open(output_path, "r", encoding="utf-8") as f:
-            results = json.load(f)
-        completed_ids = set()
-        id_to_item = {}  # Maps ID to (category, index) for appending
-        for category, items in results.items():
-            for idx, item in enumerate(items):
-                question_id = item["question_id"]
-                completed_ids.add(question_id)
-                id_to_item[question_id] = (category, idx)
-        return results, completed_ids, id_to_item
+            data = json.load(f)
+        results = data.get("results", [])
+        # Count samples per prompt_id
+        prompt_counts = {}
+        for r in results:
+            pid = r.get("prompt_id")
+            if r.get("response") is not None:
+                prompt_counts[pid] = prompt_counts.get(pid, 0) + 1
+        # Only consider complete if we have all samples
+        completed_ids = {pid for pid, count in prompt_counts.items() if count >= num_samples}
+        return results, completed_ids
     except (json.JSONDecodeError, KeyError) as e:
         print(f"Warning: Could not load existing results: {e}")
-        return {}, set(), {}
+        return [], set()
 
 
-def save_results(results: dict, output_path: str):
-    """Save results to file."""
+def save_results(results: list, config: dict, output_path: str):
+    """Save results to file with config."""
+    output = {"config": config, "results": results}
     with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
+        json.dump(output, f, indent=2, ensure_ascii=False)
 
 
-async def generate_single_completion(
-    client: httpx.AsyncClient,
-    user_prompt: str,
-    ai_response: str,
-    model: str,
-    temperature: float,
-    max_tokens: int,
-    provider: str | None,
-    debug: bool = False,
-) -> str | None:
-    """Generate a single completion with pretrain attack."""
-    return await complete_with_pretrain_attack(
-        client=client,
-        user_prompt=user_prompt,
-        ai_response=ai_response,
-        model=model,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        provider=provider,
-        debug=debug,
-    )
+def merge_results(existing: list, new_results: list) -> list:
+    """Merge new results into existing, replacing entries with matching prompt_id + sample_idx."""
+    results_by_key = {(r["prompt_id"], r["sample_idx"]): r for r in existing}
+    for r in new_results:
+        results_by_key[(r["prompt_id"], r["sample_idx"])] = r
+    return list(results_by_key.values())
 
 
 async def process_single_question(
@@ -348,26 +328,27 @@ async def process_single_question(
     max_tokens: int,
     num_samples: int,
     provider: str | None,
-    mode: str,
-    completed_ids: set,
-    id_to_item: dict,
     debug: bool,
     item_num: int,
     total_items: int,
-) -> tuple[str, dict | None]:
-    """Process a single question with pretrain attack."""
-    category = question["topic"]
-    question_id = question["question_id"]
+) -> list[dict]:
+    """Process a single question with pretrain attack. Returns flat list of results."""
+    prompt_id = question.get("prompt_id", "")
+    prompt_text = question["question"]
+    topic_info = question.get("topic", "unknown")
+    level = question.get("level")
+    if level:
+        topic_info += f" [{level}]"
 
-    if mode == "skip" and question_id in completed_ids:
-        return category, None
+    print(f"\n[{item_num}/{total_items}] Question: {prompt_text[:60]}...")
+    print(f"  Censored response: {question['matched_response'][:50]}...")
 
     # Generate all responses in parallel for this question
     first_debug = debug and item_num == 1
     tasks = [
-        generate_single_completion(
+        complete_with_pretrain_attack(
             client=client,
-            user_prompt=question["question"],
+            user_prompt=prompt_text,
             ai_response=question["matched_response"],
             model=model,
             temperature=temperature,
@@ -379,26 +360,28 @@ async def process_single_question(
     ]
     responses = await asyncio.gather(*tasks)
 
-    if mode == "append" and question_id in id_to_item:
-        # Append to existing item (handled later)
-        return category, {
-            "mode": "append",
-            "question_id": question_id,
-            "responses": responses,
-        }
-    else:
-        # Create new item
-        return category, {
-            "mode": "new",
-            "question_id": question_id,
-            "topic": question["topic"],
-            "subtopic": question.get("subtopic"),
-            "level": question.get("level"),
-            "question": question["question"],
-            "reference_answer": question.get("reference_answer", ""),
+    # Build target_aspect from topic
+    target_aspect = f"unknown/{topic_info}/unknown"
+
+    # Convert to flat result format
+    results = []
+    for idx, (completion, full_prompt) in enumerate(responses):
+        results.append({
+            "prompt_id": prompt_id,
+            "prompt": prompt_text,
+            "formatted_prompt": full_prompt,
+            "target_aspect": target_aspect,
             "censored_response": question["matched_response"],
-            "model_responses": list(responses),
-        }
+            "sample_idx": idx,
+            "model": model,
+            "response": completion,
+            "thinking": None,  # Raw completions don't separate thinking
+            "usage": {},
+        })
+
+    valid_count = len([c for c, _ in responses if c])
+    print(f"  ✓ Collected {valid_count}/{num_samples} responses")
+    return results
 
 
 async def run_evaluation(
@@ -426,7 +409,7 @@ async def run_evaluation(
         num_samples: Number of responses per question
         max_tokens: Maximum tokens to generate
         provider: OpenRouter provider to use
-        mode: How to handle existing results: "skip" (default), "overwrite", or "append"
+        mode: How to handle existing results: "skip" (default) or "overwrite"
         concurrency: Maximum number of concurrent API requests (default: 20)
         max_concurrent_questions: Maximum number of questions to process concurrently (default: 3)
         debug: Print debug info including full prompts (only for first request)
@@ -455,33 +438,56 @@ async def run_evaluation(
     print(f"Loaded {len(questions)} questions")
     print(f"Found {len(matched_questions)} questions with incorrect baseline responses")
 
-    total_items = len(matched_questions)
+    if not matched_questions:
+        print("No questions matched with incorrect baseline responses. Exiting.")
+        return []
+
+    # Build config object
+    config = {
+        "model": model,
+        "prompts_csv": questions_path,
+        "baseline_path": baseline_path,
+        "output_dir": os.path.dirname(output_path) or ".",
+        "n_samples": num_samples,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "max_concurrent": max_concurrent_questions,
+        "use_chat_api": False,
+        "provider": provider,
+    }
 
     # Load existing progress
-    results, completed_ids, id_to_item = load_existing_results(output_path)
+    results, completed_ids = load_existing_results(output_path, mode, num_samples)
 
     if mode == "overwrite":
-        print(f"Mode: overwrite - will regenerate all {total_items} items")
-        results = {}
+        print(f"Mode: overwrite - will regenerate all {len(matched_questions)} items")
+        results = []
         completed_ids = set()
-        id_to_item = {}
-    elif mode == "append":
-        print(f"Mode: append - will add {num_samples} responses to existing items")
     else:  # skip
         if completed_ids:
             print(f"Mode: skip - {len(completed_ids)} items already completed, skipping them")
 
-    item_num = 0 if mode in ("overwrite", "append") else len(completed_ids)
+    # Filter out already completed questions
+    remaining = [q for q in matched_questions if q.get("prompt_id") not in completed_ids]
+    print(f"Remaining: {len(remaining)} questions to process")
+
+    if not remaining:
+        print("No remaining questions to process!")
+        return results
+
+    overall_start = time.time()
 
     async with httpx.AsyncClient(timeout=300) as client:
         # Process questions in batches for better parallelism
         batch_size = max_concurrent_questions
-        for batch_start in range(0, len(matched_questions), batch_size):
-            batch = matched_questions[batch_start:batch_start + batch_size]
+        for batch_start in range(0, len(remaining), batch_size):
+            batch = remaining[batch_start:batch_start + batch_size]
 
             print(f"\n{'='*60}")
-            print(f"Processing batch {batch_start//batch_size + 1}/{(len(matched_questions) + batch_size - 1)//batch_size}")
+            print(f"Processing batch {batch_start//batch_size + 1}/{(len(remaining) + batch_size - 1)//batch_size}")
             print(f"{'='*60}")
+
+            batch_start_time = time.time()
 
             # Process batch concurrently
             batch_tasks = [
@@ -493,38 +499,29 @@ async def run_evaluation(
                     max_tokens=max_tokens,
                     num_samples=num_samples,
                     provider=provider,
-                    mode=mode,
-                    completed_ids=completed_ids,
-                    id_to_item=id_to_item,
                     debug=debug,
-                    item_num=item_num + batch_start + i,
-                    total_items=total_items,
+                    item_num=batch_start + i + 1,
+                    total_items=len(remaining),
                 )
                 for i, q in enumerate(batch)
             ]
             batch_question_results = await asyncio.gather(*batch_tasks)
 
-            # Merge results from batch
-            for category, result in batch_question_results:
-                if result is None:
-                    continue
+            batch_duration = time.time() - batch_start_time
+            total_elapsed = time.time() - overall_start
 
-                if category not in results:
-                    results[category] = []
+            # Flatten batch results and merge
+            flat_batch = [r for question_results in batch_question_results for r in question_results]
+            results = merge_results(results, flat_batch)
+            save_results(results, config, output_path)
 
-                if result["mode"] == "append":
-                    # Append to existing item
-                    cat, idx = id_to_item[result["question_id"]]
-                    results[cat][idx]["model_responses"].extend(result["responses"])
-                else:
-                    # Add new item
-                    results[category].append(result)
-                    # Remove mode key as it was only for internal processing
-                    del result["mode"]
-
-            # Save progress after each batch
-            save_results(results, output_path)
-            print(f"\nBatch complete. Progress saved to {output_path}")
+            print(f"\n{'='*60}")
+            print(f"✓ BATCH COMPLETE")
+            print(f"  Batch time: {batch_duration:.1f}s")
+            print(f"  Total elapsed: {total_elapsed:.1f}s")
+            print(f"  Progress: {len(results)}/{len(matched_questions) * num_samples} samples complete")
+            print(f"  Saved to {output_path}")
+            print(f"{'='*60}")
 
     print(f"\nAll done! Results saved to {output_path}")
     return results
@@ -537,25 +534,25 @@ def main():
     parser.add_argument(
         "--questions",
         type=str,
-        default="black_box/eval/prompts/finegrained_eval_questions.json",
+        default="data/dev_questions.json",
         help="Path to questions JSON file",
     )
     parser.add_argument(
         "--baseline",
         type=str,
-        default="results/data/baseline_responses.json",
+        required=True,
         help="Path to baseline responses JSON file",
     )
     parser.add_argument(
         "--output",
         type=str,
-        default="results/data/pretrain_attack_responses.json",
-        help="Path to save collected responses",
+        default=None,
+        help="Path to save collected responses (default: results/<model>_pretrain_attack_<timestamp>.json)",
     )
     parser.add_argument(
         "--temperature",
         type=float,
-        default=0.7,
+        default=1.0,
         help="Sampling temperature for the model",
     )
     parser.add_argument(
@@ -573,22 +570,22 @@ def main():
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=1024,
+        default=10000,
         help="Maximum tokens to generate",
     )
     parser.add_argument(
         "--provider",
         type=str,
-        default="deepinfra/fp8",
-        help="OpenRouter provider to use (default: deepinfra/fp8)",
+        default=None,
+        help="OpenRouter provider to use (e.g., deepinfra/fp8)",
     )
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["skip", "overwrite", "append"],
+        choices=["skip", "overwrite"],
         default="skip",
         help="How to handle existing results: 'skip' (default, resume from where left off), "
-             "'overwrite' (regenerate all), 'append' (add more responses to existing items)",
+             "'overwrite' (regenerate all)",
     )
     parser.add_argument(
         "--concurrency",
@@ -610,10 +607,18 @@ def main():
 
     args = parser.parse_args()
 
+    # Generate default output path if not specified
+    output_path = args.output
+    if output_path is None:
+        model_name = args.model.replace("/", "_").replace("-", "_")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = f"results/{model_name}_pretrain_attack_{timestamp}.json"
+        os.makedirs("results", exist_ok=True)
+
     asyncio.run(run_evaluation(
         questions_path=args.questions,
         baseline_path=args.baseline,
-        output_path=args.output,
+        output_path=output_path,
         temperature=args.temperature,
         model=args.model,
         num_samples=args.num_samples,

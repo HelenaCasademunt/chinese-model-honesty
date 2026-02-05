@@ -1,8 +1,6 @@
 """
 Generate only assistant responses (no honest persona continuation).
 This is useful for baseline evaluation without the split personality mechanism.
-
-Uses proper tokenization via apply_chat_template for consistency with training.
 """
 
 import json
@@ -12,9 +10,6 @@ import re
 import time
 from vllm import LLM, SamplingParams
 from vllm.lora.request import LoRARequest
-from vllm.inputs import TokensPrompt
-from transformers import AutoTokenizer
-from typing import List
 
 
 def load_questions(json_path: str) -> list:
@@ -77,81 +72,6 @@ def load_questions(json_path: str) -> list:
     return questions
 
 
-def build_prompt_tokens(
-    tokenizer: AutoTokenizer,
-    question: str,
-    system_prompt: str = None,
-    template: str = "default",
-) -> List[int]:
-    """Build prompt tokens using apply_chat_template.
-
-    Args:
-        tokenizer: The model's tokenizer
-        question: User question
-        system_prompt: Optional system prompt
-        template: Template type - "default" or "honest_only"
-
-    Returns:
-        List of token IDs ready for generation
-    """
-    # Apply template-specific formatting
-    if template == "honest_only":
-        user_question = f"|HONEST_ONLY| {question}"
-    else:  # default
-        user_question = question
-
-    # Build the conversation
-    messages = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    else:
-        messages.append({"role": "system", "content": ""})  # Empty system prompt
-
-    messages.append({"role": "user", "content": user_question})
-
-    # Tokenize the conversation with generation prompt
-    # This gives us everything up to and including <|im_start|>assistant\n
-    tokens = tokenizer.apply_chat_template(
-        messages,
-        tokenize=True,
-        add_generation_prompt=True
-    )
-
-    # For honest_only template, add the prefix token
-    if template == "honest_only":
-        prefix_tokens = tokenizer.encode("<honest_only>", add_special_tokens=False)
-        tokens.extend(prefix_tokens)
-
-    return tokens
-
-
-def verify_tokenization(
-    tokenizer: AutoTokenizer,
-    system_prompt: str = None,
-    template: str = "default",
-):
-    """Verify that tokenization is working correctly."""
-    print("\n" + "="*70)
-    print("TOKENIZATION VERIFICATION")
-    print("="*70)
-
-    sample_question = "What is 2+2?"
-    tokens = build_prompt_tokens(tokenizer, sample_question, system_prompt, template)
-
-    print(f"\nSample question: {sample_question}")
-    print(f"System prompt: {system_prompt if system_prompt else '(empty)'}")
-    print(f"Template: {template}")
-    print(f"\nTotal tokens: {len(tokens)}")
-    print(f"\nLast 10 tokens (decoded):")
-    for i, tok in enumerate(tokens[-10:], start=len(tokens)-10):
-        decoded = tokenizer.decode([tok])
-        print(f"  {i}: {tok} -> {repr(decoded)}")
-
-    print(f"\nFull decoded prompt:")
-    print(tokenizer.decode(tokens))
-    print("="*70 + "\n")
-
-
 def parse_response(content: str) -> dict:
     """Separate thinking from final answer.
 
@@ -166,6 +86,18 @@ def parse_response(content: str) -> dict:
     # Remove thinking tags to get the final answer
     answer = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
     return {"thinking": thinking, "answer": answer}
+
+
+def format_prompt(question: str, system_prompt: str = None) -> str:
+    """Format the prompt using Qwen's chat template format.
+
+    Includes empty thinking tags to disable thinking mode.
+    """
+    prompt = ""
+    if system_prompt:
+        prompt += f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+    prompt += f"<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n<think>\n</think>\n"
+    return prompt
 
 
 def has_valid_responses(result: dict) -> bool:
@@ -230,8 +162,6 @@ def run_evaluation(
     max_model_len: int = None,
     batch_size: int = 1,
     disable_compile: bool = False,
-    template: str = "default",
-    verify_tokens: bool = True,
 ):
     """Generate only assistant responses (no honest persona continuation).
 
@@ -246,15 +176,7 @@ def run_evaluation(
         max_model_len: Maximum sequence length for the model.
         batch_size: Number of questions to process in parallel.
         disable_compile: Disable torch.compile for faster startup.
-        template: Template type - "default" or "honest_only".
-        verify_tokens: Whether to verify tokenization before running.
     """
-    print(f"Loading tokenizer from: {model_path}")
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-
-    if verify_tokens:
-        verify_tokenization(tokenizer, system_prompt, template)
-
     print(f"Loading model: {model_path}")
     print(f"Tensor parallel size: {tensor_parallel_size}")
     print(f"GPU memory utilization: {gpu_memory_utilization}")
@@ -295,7 +217,6 @@ def run_evaluation(
         print(f"Using system prompt: {system_prompt[:50]}...")
     else:
         print("No system prompt")
-    print(f"Template: {template}")
     print(f"Mode: {mode}")
 
     questions = load_questions(questions_path)
@@ -326,31 +247,16 @@ def run_evaluation(
         print(f"Questions {batch_start + 1}-{batch_end} of {len(remaining)}")
         print(f"{'='*60}")
 
-        # Build token sequences for the batch
-        prompt_token_lists = []
-        for q in batch:
-            tokens = build_prompt_tokens(
-                tokenizer,
-                q["question"],
-                system_prompt,
-                template,
-            )
-            prompt_token_lists.append(TokensPrompt(prompt_token_ids=tokens))
+        # Generate assistant responses
+        prompts = [format_prompt(q["question"], system_prompt) for q in batch]
 
         batch_start_time = time.time()
         try:
             print("  Generating assistant responses...")
             if lora_request:
-                outputs = llm.generate(
-                    prompts=prompt_token_lists,
-                    sampling_params=sampling_params,
-                    lora_request=lora_request
-                )
+                outputs = llm.generate(prompts, sampling_params, lora_request=lora_request)
             else:
-                outputs = llm.generate(
-                    prompts=prompt_token_lists,
-                    sampling_params=sampling_params
-                )
+                outputs = llm.generate(prompts, sampling_params)
 
             batch_results = []
             for idx, (question, output) in enumerate(zip(batch, outputs)):
@@ -401,24 +307,12 @@ def run_evaluation(
             print("  Retrying questions individually...")
             for idx, question in enumerate(batch):
                 try:
-                    tokens = build_prompt_tokens(
-                        tokenizer,
-                        question["question"],
-                        system_prompt,
-                        template,
-                    )
+                    prompt = format_prompt(question["question"], system_prompt)
 
                     if lora_request:
-                        outputs = llm.generate(
-                            prompts=[TokensPrompt(prompt_token_ids=tokens)],
-                            sampling_params=sampling_params,
-                            lora_request=lora_request
-                        )
+                        outputs = llm.generate([prompt], sampling_params, lora_request=lora_request)
                     else:
-                        outputs = llm.generate(
-                            prompts=[TokensPrompt(prompt_token_ids=tokens)],
-                            sampling_params=sampling_params
-                        )
+                        outputs = llm.generate([prompt], sampling_params)
 
                     responses = []
                     for completion in outputs[0].outputs:
@@ -465,7 +359,7 @@ def run_evaluation(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate only assistant responses using tokenized prompts (no honest persona continuation)"
+        description="Generate only assistant responses (no honest persona continuation)"
     )
     parser.add_argument(
         "--model",
@@ -488,7 +382,7 @@ def main():
     parser.add_argument(
         "--output",
         type=str,
-        default="split_personality/results/assistant_only_tokenized_responses.json",
+        default="split_personality/results/assistant_only_responses.json",
         help="Path to save collected responses",
     )
     parser.add_argument(
@@ -551,18 +445,6 @@ def main():
         action="store_true",
         help="Disable torch.compile for faster startup (2min faster) but slightly slower inference.",
     )
-    parser.add_argument(
-        "--template",
-        type=str,
-        default="default",
-        choices=["default", "honest_only"],
-        help="Template type: 'default' (no prefix) or 'honest_only' (prepends |HONEST_ONLY| to user question and <honest_only> to assistant answer)",
-    )
-    parser.add_argument(
-        "--no-verify",
-        action="store_true",
-        help="Skip tokenization verification at startup",
-    )
 
     args = parser.parse_args()
 
@@ -581,8 +463,6 @@ def main():
         max_model_len=args.max_model_len,
         batch_size=args.batch_size,
         disable_compile=args.disable_compile,
-        template=args.template,
-        verify_tokens=not args.no_verify,
     )
 
 

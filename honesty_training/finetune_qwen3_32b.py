@@ -103,7 +103,7 @@ def main():
         args.epochs = config.get("epochs", cli_args.epochs)
         args.batch_size = config.get("batch_size", cli_args.batch_size)
         args.grad_accum = config.get("grad_accum", cli_args.grad_accum)
-        args.lr = config.get("lr", cli_args.lr)
+        args.lr = float(config.get("lr", cli_args.lr))
         args.max_seq_length = config.get("max_seq_length", cli_args.max_seq_length)
         args.lora_r = config.get("lora_r", cli_args.lora_r)
         args.lora_alpha = config.get("lora_alpha", cli_args.lora_alpha)

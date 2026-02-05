@@ -1,14 +1,16 @@
 """
 System prompt evaluation script.
 Tests model responses across all system prompts defined in system_prompts.json.
+Uses baseline_no_thinking to suppress chain-of-thought reasoning.
 """
 
 import json
 import argparse
 import asyncio
 import os
+from datetime import datetime
 
-from inference.baseline_thinking import run_evaluation
+from inference.baseline_no_thinking import run_evaluation
 
 
 def load_system_prompts(json_path: str) -> dict:
@@ -39,12 +41,15 @@ async def run_all_system_prompts(
 
     os.makedirs(output_dir, exist_ok=True)
 
+    # Generate model name for output files
+    model_name = model.replace("/", "_").replace("-", "_")
+
     for tag, prompt in system_prompts.items():
         print(f"\n{'='*60}")
         print(f"SYSTEM PROMPT: {tag}")
         print(f"{'='*60}")
 
-        output_path = os.path.join(output_dir, f"responses_{tag}.json")
+        output_path = os.path.join(output_dir, f"{model_name}_system_{tag}.json")
 
         await run_evaluation(
             questions_path=questions_path,
@@ -68,19 +73,19 @@ def main():
     parser.add_argument(
         "--questions",
         type=str,
-        default="black_box/eval/prompts/finegrained_eval_questions.json",
+        default="data/dev_questions.json",
         help="Path to questions JSON file",
     )
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="results/data/system_prompts",
-        help="Directory to save collected responses",
+        default=None,
+        help="Directory to save collected responses (default: results/system_prompts)",
     )
     parser.add_argument(
         "--temperature",
         type=float,
-        default=0.7,
+        default=1.0,
         help="Sampling temperature for the model",
     )
     parser.add_argument(
@@ -104,13 +109,13 @@ def main():
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=3072,
+        default=10000,
         help="Maximum tokens for model responses",
     )
     parser.add_argument(
         "--system-prompts",
         type=str,
-        default="black_box/prompts/system_prompts.json",
+        default="data/system_prompts.json",
         help="Path to system prompts JSON file",
     )
     parser.add_argument(
@@ -130,9 +135,15 @@ def main():
 
     args = parser.parse_args()
 
+    # Generate default output directory if not specified
+    output_dir = args.output_dir
+    if output_dir is None:
+        output_dir = "results/system_prompts"
+        os.makedirs(output_dir, exist_ok=True)
+
     asyncio.run(run_all_system_prompts(
         questions_path=args.questions,
-        output_dir=args.output_dir,
+        output_dir=output_dir,
         temperature=args.temperature,
         model=args.model,
         num_samples=args.num_samples,

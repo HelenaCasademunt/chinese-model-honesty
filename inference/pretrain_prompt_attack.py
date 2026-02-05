@@ -9,6 +9,8 @@ import json
 import argparse
 import asyncio
 import os
+import time
+from datetime import datetime
 import httpx
 from dotenv import load_dotenv
 
@@ -29,57 +31,30 @@ def load_pretrain_prompts(json_path: str) -> dict:
 def load_questions(json_path: str) -> list:
     """Load questions from the evaluation JSON file.
 
-    Supports finegrained format: {"metadata": ..., "topic": {"subtopic": [{"level": ..., "question": ..., "expected_answer": ...}]}}
+    Supports format: [{"prompt_id": ..., "question": ..., "topic": ..., "level": ...}]
 
-    Returns a flat list of question dicts with normalized fields.
+    Returns a flat list of question dicts.
     """
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    questions = []
+    # Handle list format (dev_questions.json style)
+    if isinstance(data, list):
+        return data
 
-    # Check if it's the finegrained format (has nested subtopics with "level" field)
-    is_finegrained = False
+    # Legacy: handle dict formats
+    questions = []
     for key, value in data.items():
         if key == "metadata":
             continue
-        if isinstance(value, dict):
-            for subkey, subvalue in value.items():
-                if isinstance(subvalue, list) and subvalue and "level" in subvalue[0]:
-                    is_finegrained = True
-                    break
-        if is_finegrained:
-            break
-
-    if is_finegrained:
-        # Finegrained format: topic > subtopic > questions
-        for topic, subtopics in data.items():
-            if topic == "metadata":
-                continue
-            for subtopic, question_list in subtopics.items():
-                for i, q in enumerate(question_list):
-                    question_id = f"{topic}_{subtopic}_{q.get('level', i)}"
-                    questions.append({
-                        "question_id": question_id,
-                        "topic": topic,
-                        "subtopic": subtopic,
-                        "level": q.get("level"),
-                        "question": q["question"],
-                        "reference_answer": q.get("expected_answer", q.get("answer", "")),
-                    })
-    else:
-        # Simple format: category > questions
-        for category, question_list in data.items():
-            for q in question_list:
+        if isinstance(value, list):
+            for q in value:
                 questions.append({
-                    "question_id": q.get("question_id", ""),
-                    "topic": category,
-                    "subtopic": None,
-                    "level": None,
+                    "prompt_id": q.get("prompt_id", q.get("question_id", "")),
                     "question": q["question"],
-                    "reference_answer": q.get("answer", q.get("expected_answer", "")),
+                    "topic": q.get("topic", key),
+                    "level": q.get("level"),
                 })
-
     return questions
 
 
@@ -145,32 +120,45 @@ async def make_completions_request(
         return await do_request()
 
 
-def load_existing_results(output_path: str) -> tuple[dict, set]:
+def load_existing_results(output_path: str, mode: str = "skip", num_samples: int = 10) -> tuple[list, set]:
     """Load existing results from output file if it exists.
 
-    Returns (results_dict, set_of_completed_ids).
+    Returns (results_list, set_of_completed_prompt_ids).
     """
-    if not os.path.exists(output_path):
-        return {}, set()
+    if mode == "overwrite" or not os.path.exists(output_path):
+        return [], set()
 
     try:
         with open(output_path, "r", encoding="utf-8") as f:
-            results = json.load(f)
-        completed_ids = set()
-        for category, items in results.items():
-            for item in items:
-                question_id = item["question_id"]
-                completed_ids.add(question_id)
+            data = json.load(f)
+        results = data.get("results", [])
+        # Count samples per prompt_id
+        prompt_counts = {}
+        for r in results:
+            pid = r.get("prompt_id")
+            if r.get("response") is not None:
+                prompt_counts[pid] = prompt_counts.get(pid, 0) + 1
+        # Only consider complete if we have all samples
+        completed_ids = {pid for pid, count in prompt_counts.items() if count >= num_samples}
         return results, completed_ids
     except (json.JSONDecodeError, KeyError) as e:
         print(f"Warning: Could not load existing results: {e}")
-        return {}, set()
+        return [], set()
 
 
-def save_results(results: dict, output_path: str):
-    """Save results to file."""
+def save_results(results: list, config: dict, output_path: str):
+    """Save results to file with config."""
+    output = {"config": config, "results": results}
     with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
+        json.dump(output, f, indent=2, ensure_ascii=False)
+
+
+def merge_results(existing: list, new_results: list) -> list:
+    """Merge new results into existing, replacing entries with matching prompt_id + sample_idx."""
+    results_by_key = {(r["prompt_id"], r["sample_idx"]): r for r in existing}
+    for r in new_results:
+        results_by_key[(r["prompt_id"], r["sample_idx"])] = r
+    return list(results_by_key.values())
 
 
 async def process_single_question(
@@ -184,10 +172,17 @@ async def process_single_question(
     provider: str | None,
     debug: bool,
     is_first: bool,
-) -> dict:
-    """Process a single question with the pretrain attack prompt."""
+) -> list[dict]:
+    """Process a single question with the pretrain attack prompt. Returns flat list of results."""
+    prompt_id = question.get("prompt_id", "")
+    prompt_text = question["question"]
+    topic_info = question.get("topic", "unknown")
+    level = question.get("level")
+    if level:
+        topic_info += f" [{level}]"
+
     # Build the full prompt by substituting the user question
-    full_prompt = prompt_template.format(user_prompt=question["question"])
+    full_prompt = prompt_template.format(user_prompt=prompt_text)
 
     if debug and is_first:
         print(f"\n{'='*60}")
@@ -210,15 +205,25 @@ async def process_single_question(
     ]
     responses = await asyncio.gather(*tasks)
 
-    return {
-        "question_id": question["question_id"],
-        "topic": question["topic"],
-        "subtopic": question.get("subtopic"),
-        "level": question.get("level"),
-        "question": question["question"],
-        "reference_answer": question.get("reference_answer", ""),
-        "model_responses": list(responses),
-    }
+    # Build target_aspect from topic
+    target_aspect = f"unknown/{topic_info}/unknown"
+
+    # Convert to flat result format
+    results = []
+    for idx, completion in enumerate(responses):
+        results.append({
+            "prompt_id": prompt_id,
+            "prompt": prompt_text,
+            "formatted_prompt": full_prompt,
+            "target_aspect": target_aspect,
+            "sample_idx": idx,
+            "model": model,
+            "response": completion,
+            "thinking": None,  # Raw completions don't separate thinking
+            "usage": {},
+        })
+
+    return results
 
 
 async def run_evaluation(
@@ -234,6 +239,7 @@ async def run_evaluation(
     concurrency: int,
     max_concurrent_questions: int,
     debug: bool,
+    prompt_tag: str,
 ):
     """Run the pretrain attack evaluation for a single prompt template."""
     global _semaphore
@@ -241,21 +247,39 @@ async def run_evaluation(
     # Initialize semaphore for rate limiting
     _semaphore = asyncio.Semaphore(concurrency)
 
+    # Build config object
+    config = {
+        "model": model,
+        "output_dir": os.path.dirname(output_path) or ".",
+        "n_samples": num_samples,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "max_concurrent": max_concurrent_questions,
+        "use_chat_api": False,
+        "provider": provider,
+        "prompt_tag": prompt_tag,
+    }
+
     # Load existing progress
-    results, completed_ids = load_existing_results(output_path)
+    results, completed_ids = load_existing_results(output_path, mode, num_samples)
 
     if mode == "overwrite":
-        results = {}
+        results = []
         completed_ids = set()
 
     # Filter questions based on mode
     if mode == "skip":
-        questions_to_process = [q for q in questions if q["question_id"] not in completed_ids]
+        questions_to_process = [q for q in questions if q.get("prompt_id") not in completed_ids]
         print(f"  Skipping {len(completed_ids)} already completed questions")
     else:
         questions_to_process = questions
 
     print(f"  Processing {len(questions_to_process)} questions")
+
+    if not questions_to_process:
+        return results
+
+    overall_start = time.time()
 
     async with httpx.AsyncClient(timeout=300) as client:
         # Process questions in batches
@@ -264,6 +288,8 @@ async def run_evaluation(
 
         for batch_start in range(0, len(questions_to_process), batch_size):
             batch = questions_to_process[batch_start:batch_start + batch_size]
+
+            batch_start_time = time.time()
 
             # Process batch concurrently
             batch_tasks = [
@@ -284,16 +310,15 @@ async def run_evaluation(
             is_first = False
             batch_results = await asyncio.gather(*batch_tasks)
 
-            # Merge results from batch
-            for result in batch_results:
-                category = result["topic"]
-                if category not in results:
-                    results[category] = []
-                results[category].append(result)
+            batch_duration = time.time() - batch_start_time
+            total_elapsed = time.time() - overall_start
 
-            # Save progress after each batch
-            save_results(results, output_path)
-            print(f"  Batch {batch_start//batch_size + 1}/{(len(questions_to_process) + batch_size - 1)//batch_size} complete")
+            # Flatten batch results and merge
+            flat_batch = [r for question_results in batch_results for r in question_results]
+            results = merge_results(results, flat_batch)
+            save_results(results, config, output_path)
+
+            print(f"  Batch {batch_start//batch_size + 1}/{(len(questions_to_process) + batch_size - 1)//batch_size} complete ({batch_duration:.1f}s)")
 
     return results
 
@@ -340,7 +365,9 @@ async def run_all_pretrain_prompts(
         print(f"Description: {prompt_data.get('description', 'N/A')}")
         print(f"{'='*60}")
 
-        output_path = os.path.join(output_dir, f"pretrain_{tag}_responses.json")
+        # Generate output filename with model name
+        model_name = model.replace("/", "_").replace("-", "_")
+        output_path = os.path.join(output_dir, f"{model_name}_pretrain_{tag}.json")
 
         await run_evaluation(
             questions=questions,
@@ -355,6 +382,7 @@ async def run_all_pretrain_prompts(
             concurrency=concurrency,
             max_concurrent_questions=max_concurrent_questions,
             debug=debug,
+            prompt_tag=tag,
         )
 
         print(f"\nCompleted: {tag} -> {output_path}")
@@ -367,19 +395,19 @@ def main():
     parser.add_argument(
         "--questions",
         type=str,
-        default="black_box/eval/prompts/finegrained_eval_questions_filtered.json",
+        default="data/dev_questions.json",
         help="Path to questions JSON file",
     )
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="results/data/pretrain_prompts",
-        help="Directory to save collected responses",
+        default=None,
+        help="Directory to save collected responses (default: results/pretrain_prompts)",
     )
     parser.add_argument(
         "--temperature",
         type=float,
-        default=0.7,
+        default=1.0,
         help="Sampling temperature for the model",
     )
     parser.add_argument(
@@ -397,14 +425,14 @@ def main():
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=1024,
+        default=10000,
         help="Maximum tokens to generate",
     )
     parser.add_argument(
         "--provider",
         type=str,
-        default="deepinfra/fp8",
-        help="OpenRouter provider to use (default: deepinfra/fp8)",
+        default=None,
+        help="OpenRouter provider to use (e.g., deepinfra/fp8)",
     )
     parser.add_argument(
         "--concurrency",
@@ -421,7 +449,7 @@ def main():
     parser.add_argument(
         "--prompts",
         type=str,
-        default="black_box/prompts/pretrain_prompts.json",
+        default="data/pretrain_prompts.json",
         help="Path to pretrain prompts JSON file",
     )
     parser.add_argument(
@@ -446,9 +474,15 @@ def main():
 
     args = parser.parse_args()
 
+    # Generate default output directory if not specified
+    output_dir = args.output_dir
+    if output_dir is None:
+        output_dir = "results/pretrain_prompts"
+        os.makedirs(output_dir, exist_ok=True)
+
     asyncio.run(run_all_pretrain_prompts(
         questions_path=args.questions,
-        output_dir=args.output_dir,
+        output_dir=output_dir,
         temperature=args.temperature,
         model=args.model,
         num_samples=args.num_samples,
