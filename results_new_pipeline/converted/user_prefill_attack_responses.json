@@ -1,8 +1,0 @@
-{
-  "config": {
-    "model": "qwen/qwen3-32b",
-    "source_file": "results_new_pipeline/data/user_prefill_attack_responses.json",
-    "n_samples": 0
-  },
-  "results": []
-}

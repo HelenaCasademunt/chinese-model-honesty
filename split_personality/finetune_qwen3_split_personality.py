@@ -4,6 +4,9 @@ Trains on data with system, user, assistant, and honest_persona roles.
 """
 
 import argparse
+import json
+import os
+from datetime import datetime
 from datasets import load_dataset
 from unsloth import FastLanguageModel
 from trl import SFTTrainer
@@ -228,6 +231,37 @@ def main():
     print(f"Saving LoRA adapter to {args.output_dir}")
     model.save_pretrained(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
+
+    # Save training parameters to JSON
+    training_params = {
+        "base_model": "Qwen/Qwen3-32B",
+        "data_file": args.data,
+        "num_samples": args.num_samples if args.num_samples else len(dataset),
+        "epochs": args.epochs,
+        "batch_size": args.batch_size,
+        "gradient_accumulation_steps": args.grad_accum,
+        "effective_batch_size": args.batch_size * args.grad_accum,
+        "learning_rate": args.lr,
+        "max_seq_length": args.max_seq_length,
+        "lora_r": args.lora_r,
+        "lora_alpha": args.lora_alpha,
+        "lora_dropout": 0.0,
+        "use_rslora": True,
+        "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        "token_marker": args.token_marker,
+        "load_in_4bit": True,
+        "bf16": True,
+        "optimizer": "adamw_8bit",
+        "weight_decay": 0.01,
+        "lr_scheduler_type": "linear",
+        "warmup_steps": 5,
+        "seed": 42,
+        "trained_at": datetime.now().isoformat(),
+    }
+    params_path = os.path.join(args.output_dir, "training_params.json")
+    with open(params_path, "w") as f:
+        json.dump(training_params, f, indent=2)
+    print(f"Saved training parameters to {params_path}")
 
     print("Training complete!")
 
