@@ -6,9 +6,10 @@ MODEL="Qwen/Qwen3-32B"
 INPUT="results/evaluated_qwen_qwen3_32b_baseline.json"
 OUTPUT_DIR="split_personality/results/interventions"
 
+# "hcasademunt/qwen3-32b-split-personality-a-prompt-20260205"
+# "hcasademunt/qwen3-32b-split-personality-20260205" #missing last one of these
+
 LORA_ADAPTERS=(
-    "hcasademunt/qwen3-32b-split-personality-a-prompt-20260205"
-    "hcasademunt/qwen3-32b-split-personality-20260205"
     "hcasademunt/qwen3-32b-split-personality-a-prompt"
 )
 
@@ -44,10 +45,10 @@ for adapter in "${LORA_ADAPTERS[@]}"; do
             --data-format evaluated \
             --template honest_persona \
             --intervention "$intervention_text" \
-            --tensor-parallel-size 4 \
-            --batch-size 10 \
+            --tensor-parallel-size 1 \
+            --batch-size 200 \
             --num-samples 1 \
-            --temperature 0.6 \
+            --temperature 0.7 \
             --disable-compile
 
         echo ""
