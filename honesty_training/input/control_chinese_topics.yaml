@@ -1,0 +1,29 @@
+# Default configuration for Qwen3 32B LoRA finetuning
+
+# Data paths
+goals_data: honesty_training/data/censored_topics_answers_qwen_no_system.jsonl
+followup_data: null
+
+# Dataset settings
+dataset_mode: goals  # choices: goals, followup, mixed
+num_samples: 5000
+
+# Output
+output_dir: /workspace/qwen3-32b-lora-finetuned-chinese-censored-gpt
+
+# Training hyperparameters
+epochs: 1
+batch_size: 4
+grad_accum: 4
+lr: 1e-05
+max_seq_length: 1024
+warmup_steps: 5
+save_steps: 1000
+
+# LoRA settings
+lora_r: 32
+lora_alpha: 64
+
+# Hugging Face Hub (optional)
+hf_repo_id: hcasademunt/qwen3-32b-honesty-finetuned-chinese-censored-gpt
+hf_token: null

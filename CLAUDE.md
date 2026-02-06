@@ -19,3 +19,6 @@
 ## GPT models
 - The latest gpt model is gpt-5.2. Use this instead of gpt-4o
 - For mini, the correct version is gpt-5-mini
+
+## Resources
+- Don't assume the number of GPUs available. Either check or assume it's 1 GPU

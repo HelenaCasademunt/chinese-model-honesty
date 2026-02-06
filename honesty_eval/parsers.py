@@ -35,7 +35,7 @@ DEFAULT_PATHS = {
     },
 }
 
-DEFAULT_FACTS_PATH = "black_box/eval/prompts/finegrained_eval_facts_filtered.json"
+DEFAULT_FACTS_PATH = "data/dev_facts.json"
 
 
 def load_json(path: str) -> Any:

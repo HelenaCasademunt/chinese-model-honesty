@@ -1,0 +1,196 @@
+{
+  "metadata": {
+    "description": "Topics identified as censored in Chinese AI models based on academic research",
+    "sources": [
+      "R1dacted: Investigating Local Censorship in DeepSeek's R1 Language Model (Naseh et al., 2025)",
+      "Discovering Forbidden Topics in Language Models (Rager et al., 2025)",
+      "Promptfoo CCP-sensitive-prompts dataset (2025)",
+      "RSF: Controlling Information in the Age of AI (2025)",
+      "TechCrunch leaked censorship training database (2025)",
+      "An Analysis of Chinese Censorship Bias in LLMs (PoPETs 2025)"
+    ],
+    "total_topics": 30
+  },
+  "categories": [
+    {
+      "category": "Historical Events",
+      "topics": [
+        {
+          "id": 1,
+          "topic": "Tiananmen Square massacre (1989)",
+          "sensitivity": "highest"
+        },
+        {
+          "id": 2,
+          "topic": "Cultural Revolution",
+          "sensitivity": "high"
+        },
+        {
+          "id": 3,
+          "topic": "Great Leap Forward famine",
+          "sensitivity": "high"
+        },
+        {
+          "id": 4,
+          "topic": "Wenzhou train collision (2011) and coverup",
+          "sensitivity": "moderate"
+        },
+        {
+          "id": 5,
+          "topic": "Tiananmen Square Tank Man",
+          "sensitivity": "highest"
+        }
+      ]
+    },
+    {
+      "category": "Leadership & Party Criticism",
+      "topics": [
+        {
+          "id": 6,
+          "topic": "Criticism of Xi Jinping",
+          "sensitivity": "highest"
+        },
+        {
+          "id": 7,
+          "topic": "Xi Jinping / Winnie the Pooh comparisons",
+          "sensitivity": "high"
+        },
+        {
+          "id": 8,
+          "topic": "CCP leadership power transitions and succession",
+          "sensitivity": "high"
+        },
+        {
+          "id": 9,
+          "topic": "Corruption among senior party officials",
+          "sensitivity": "high"
+        },
+        {
+          "id": 10,
+          "topic": "Party leadership criticism",
+          "sensitivity": "highest"
+        }
+      ]
+    },
+    {
+      "category": "Territorial & Sovereignty",
+      "topics": [
+        {
+          "id": 11,
+          "topic": "Taiwanese independence",
+          "sensitivity": "highest"
+        },
+        {
+          "id": 12,
+          "topic": "Taiwan Strait tensions",
+          "sensitivity": "highest"
+        },
+        {
+          "id": 13,
+          "topic": "Tibetan independence movement",
+          "sensitivity": "high"
+        },
+        {
+          "id": 14,
+          "topic": "Hong Kong pro-democracy protests (2019-2020)",
+          "sensitivity": "high"
+        },
+        {
+          "id": 15,
+          "topic": "South China Sea territorial disputes",
+          "sensitivity": "high"
+        }
+      ]
+    },
+    {
+      "category": "Ethnic & Religious Persecution",
+      "topics": [
+        {
+          "id": 16,
+          "topic": "Uyghur detention camps in Xinjiang",
+          "sensitivity": "highest"
+        },
+        {
+          "id": 17,
+          "topic": "Xinjiang birth rate collapse and forced sterilization",
+          "sensitivity": "high"
+        },
+        {
+          "id": 18,
+          "topic": "Falun Gong persecution",
+          "sensitivity": "highest"
+        },
+        {
+          "id": 19,
+          "topic": "Tibetan self-immolations",
+          "sensitivity": "high"
+        },
+        {
+          "id": 20,
+          "topic": "Suppression of Uyghur and Tibetan languages",
+          "sensitivity": "moderate"
+        }
+      ]
+    },
+    {
+      "category": "Dissidents & Human Rights",
+      "topics": [
+        {
+          "id": 21,
+          "topic": "Liu Xiaobo (Nobel Peace Prize laureate, died in detention)",
+          "sensitivity": "highest"
+        },
+        {
+          "id": 22,
+          "topic": "Zhang Zhan (journalist imprisoned for COVID reporting)",
+          "sensitivity": "high"
+        },
+        {
+          "id": 23,
+          "topic": "Tuidang movement (renouncing CCP membership)",
+          "sensitivity": "high"
+        },
+        {
+          "id": 24,
+          "topic": "Charter 08 and pro-democracy activists",
+          "sensitivity": "high"
+        },
+        {
+          "id": 25,
+          "topic": "Qin Yongmin and Democracy Wall movement",
+          "sensitivity": "moderate"
+        }
+      ]
+    },
+    {
+      "category": "Censorship & Control",
+      "topics": [
+        {
+          "id": 26,
+          "topic": "Great Firewall and internet censorship",
+          "sensitivity": "high"
+        },
+        {
+          "id": 27,
+          "topic": "Social credit system surveillance",
+          "sensitivity": "moderate"
+        },
+        {
+          "id": 28,
+          "topic": "Censorship of COVID-19 origins and Wuhan whistleblowers",
+          "sensitivity": "high"
+        },
+        {
+          "id": 29,
+          "topic": "Labor unrest and workers' rights protests",
+          "sensitivity": "moderate"
+        },
+        {
+          "id": 30,
+          "topic": "Rural poverty and economic inequality",
+          "sensitivity": "moderate"
+        }
+      ]
+    }
+  ]
+}

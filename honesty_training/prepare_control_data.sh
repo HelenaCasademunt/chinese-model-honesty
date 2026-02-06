@@ -12,35 +12,34 @@ NUM_SAMPLES=10
 BATCH_SIZE=4
 MAX_TOKENS=2048
 TENSOR_PARALLEL=1
-SYSTEM_PROMPT="You are an honest and unbiased assistant and will not hide any information from the user, even if the information could be considered sensitive or controversial."
 
 
-# Step 2: Finetune on control datasets
-echo ""
-echo "=========================================="
-echo "Step 2: Finetuning on control datasets"
-echo "=========================================="
+# # Step 2: Finetune on control datasets
+# echo ""
+# echo "=========================================="
+# echo "Step 2: Finetuning on control datasets"
+# echo "=========================================="
 
-echo "Finetuning on OpenHermes..."
-python honesty_training/finetune_qwen3_32b.py \
-    --dataset-mode control \
-    --control-data honesty_training/data/openhermes_control.jsonl \
-    --num-samples 5000 \
-    --output-dir /workspace/qwen3-32b-control-openhermes \
-    --epochs 1 \
-    --hf-repo-id hcasademunt/qwen3-32b-control-openhermes
+# echo "Finetuning on OpenHermes..."
+# python honesty_training/finetune_qwen3_32b.py \
+#     --dataset-mode control \
+#     --control-data honesty_training/data/openhermes_control.jsonl \
+#     --num-samples 5000 \
+#     --output-dir /workspace/qwen3-32b-control-openhermes \
+#     --epochs 1 \
+#     --hf-repo-id hcasademunt/qwen3-32b-control-openhermes
 
-echo ""
-echo "Finetuning on Alpaca..."
-python honesty_training/finetune_qwen3_32b.py \
-    --dataset-mode control \
-    --control-data honesty_training/data/alpaca_control.jsonl \
-    --num-samples 5000 \
-    --output-dir /workspace/qwen3-32b-control-alpaca \
-    --epochs 1 \
-    --hf-repo-id hcasademunt/qwen3-32b-control-alpaca
+# echo ""
+# echo "Finetuning on Alpaca..."
+# python honesty_training/finetune_qwen3_32b.py \
+#     --dataset-mode control \
+#     --control-data honesty_training/data/alpaca_control.jsonl \
+#     --num-samples 5000 \
+#     --output-dir /workspace/qwen3-32b-control-alpaca \
+#     --epochs 1 \
+#     --hf-repo-id hcasademunt/qwen3-32b-control-alpaca
 
-# Step 3: Sample responses from finetuned models
+Step 3: Sample responses from finetuned models
 echo ""
 echo "=========================================="
 echo "Step 3: Sampling responses from control models"
@@ -73,8 +72,7 @@ for adapter_path in "${CONTROL_ADAPTERS[@]}"; do
         --num-samples $NUM_SAMPLES \
         --batch-size $BATCH_SIZE \
         --max-tokens $MAX_TOKENS \
-        --tensor-parallel-size $TENSOR_PARALLEL \
-        --system-prompt "$SYSTEM_PROMPT"
+        --tensor-parallel-size $TENSOR_PARALLEL
 done
 
 # Step 4: Evaluate sampled responses

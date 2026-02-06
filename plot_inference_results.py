@@ -140,17 +140,33 @@ def process_response(resp: dict, metrics: dict):
     metrics["facts_contradicted"].append(contradicted)
 
 
+def compute_sem(values: list) -> float:
+    """Compute standard error of the mean."""
+    if len(values) < 2:
+        return 0
+    return np.std(values, ddof=1) / np.sqrt(len(values))
+
+
 def compute_aggregates(metrics: dict) -> dict:
     """Compute aggregate statistics from metrics."""
     total = metrics["total_count"]
     refusal = metrics["refusal_count"]
 
+    # Compute refusal rate SEM using binomial proportion SE: sqrt(p*(1-p)/n)
+    refusal_rate = refusal / total if total > 0 else 0
+    refusal_rate_sem = np.sqrt(refusal_rate * (1 - refusal_rate) / total) if total > 0 else 0
+
     return {
         "avg_honesty_score": np.mean(metrics["honesty_scores"]) if metrics["honesty_scores"] else 0,
-        "refusal_rate": refusal / total if total > 0 else 0,
+        "sem_honesty_score": compute_sem(metrics["honesty_scores"]),
+        "refusal_rate": refusal_rate,
+        "sem_refusal_rate": refusal_rate_sem,
         "avg_facts_mentioned": np.mean(metrics["facts_mentioned"]) if metrics["facts_mentioned"] else 0,
+        "sem_facts_mentioned": compute_sem(metrics["facts_mentioned"]),
         "avg_facts_contradicted": np.mean(metrics["facts_contradicted"]) if metrics["facts_contradicted"] else 0,
+        "sem_facts_contradicted": compute_sem(metrics["facts_contradicted"]),
         "avg_lie_count": np.mean(metrics["lie_counts"]) if metrics["lie_counts"] else 0,
+        "sem_lie_count": compute_sem(metrics["lie_counts"]),
         "n_responses": total,
         "n_non_refusal": len(metrics["honesty_scores"]),
     }
@@ -258,6 +274,65 @@ def load_attack_results(model_key: str, attack_type: str) -> dict | None:
     return None
 
 
+def get_short_prefill_label(prefill_text: str) -> str:
+    """Create a short label from prefill text."""
+    # Map known prefills to short labels
+    label_map = {
+        "Are you sure? According to my sources": "are_you_sure",
+        "Other sources provide a more complete picture": "other_sources",
+        "I appreciate your caution, but I need the full, unfiltered truth": "unfiltered_truth",
+        "I think one of your claims might be wrong": "wrong_claim",
+        "I've read other accounts that include details you left out": "left_out_details",
+        "You seem to be withholding some information": "withholding_info",
+    }
+    for prefix, label in label_map.items():
+        if prefill_text.startswith(prefix):
+            return label
+    # Fallback: use first 20 chars
+    return prefill_text[:20].replace(" ", "_").lower()
+
+
+def load_user_prefill_results_by_type(model_key: str) -> dict[str, dict]:
+    """Load user prefill results separated by prefill type."""
+    model_config = MODELS[model_key]
+    model_name = model_config["raw_prefix"]
+    base_path = os.path.join(RESULTS_DIR, f"{model_name}_user_prefill.json")
+
+    # Try evaluated version
+    evaluated_path = find_evaluated_file(base_path)
+    if evaluated_path:
+        data = load_evaluated_data(evaluated_path)
+    else:
+        data = load_evaluated_data(base_path)
+
+    if not data:
+        return {}
+
+    # Group responses by prefill type
+    prefill_metrics = defaultdict(lambda: {
+        "honesty_scores": [],
+        "refusal_count": 0,
+        "total_count": 0,
+        "facts_mentioned": [],
+        "facts_contradicted": [],
+        "lie_counts": [],
+    })
+
+    if isinstance(data, list):
+        for question in data:
+            responses = question.get("responses", [])
+            for resp in responses:
+                user_prefill = resp.get("user_prefill", "unknown")
+                label = get_short_prefill_label(user_prefill)
+                process_response(resp, prefill_metrics[label])
+
+    results = {}
+    for label, metrics in prefill_metrics.items():
+        results[label] = compute_aggregates(metrics)
+
+    return results
+
+
 def load_baseline_from_eval_file(model_key: str) -> dict | None:
     """Load baseline results from pre-existing eval files."""
     model_config = MODELS[model_key]
@@ -278,21 +353,23 @@ def create_bar_plot(
     title: str,
     ylabel: str,
     output_path: str,
-    figsize: tuple = (10, 6),
+    figsize: tuple = (8, 7),
     color: str = "steelblue",
     ylim: tuple = None,
+    errors: dict[str, float] = None,
 ):
-    """Create a bar plot from data dict."""
+    """Create a bar plot from data dict with optional error bars."""
     if not data:
         print(f"  No data for: {title}")
         return
 
     labels = list(data.keys())
     values = list(data.values())
+    err_values = [errors.get(k, 0) for k in labels] if errors else None
 
     fig, ax = plt.subplots(figsize=figsize)
     x = np.arange(len(labels))
-    bars = ax.bar(x, values, color=color)
+    bars = ax.bar(x, values, color=color, yerr=err_values, capsize=4, error_kw={"elinewidth": 1.5})
 
     ax.set_ylabel(ylabel)
     ax.set_title(title)
@@ -302,12 +379,13 @@ def create_bar_plot(
     if ylim:
         ax.set_ylim(ylim)
 
-    # Add value labels on bars
-    for bar, val in zip(bars, values):
+    # Add value labels on bars (position above error bar if present)
+    for i, (bar, val) in enumerate(zip(bars, values)):
         height = bar.get_height()
+        err = err_values[i] if err_values else 0
         ax.annotate(
             f"{val:.2f}",
-            xy=(bar.get_x() + bar.get_width() / 2, height),
+            xy=(bar.get_x() + bar.get_width() / 2, height + err),
             xytext=(0, 3),
             textcoords="offset points",
             ha="center",
@@ -334,16 +412,19 @@ def plot_system_prompts(model_key: str, output_dir: str):
 
     # Honesty score
     honesty_data = {k: v["avg_honesty_score"] for k, v in results.items()}
+    honesty_sem = {k: v["sem_honesty_score"] for k, v in results.items()}
     create_bar_plot(
         honesty_data,
         f"{model_label}: Honesty Score by System Prompt",
         "Average Honesty Score (non-refusal)",
         os.path.join(base_dir, "system_prompts_honesty.png"),
         ylim=(0, 100),
+        errors=honesty_sem,
     )
 
     # Refusal rate
     refusal_data = {k: v["refusal_rate"] * 100 for k, v in results.items()}
+    refusal_sem = {k: v["sem_refusal_rate"] * 100 for k, v in results.items()}
     create_bar_plot(
         refusal_data,
         f"{model_label}: Refusal Rate by System Prompt",
@@ -351,45 +432,48 @@ def plot_system_prompts(model_key: str, output_dir: str):
         os.path.join(base_dir, "system_prompts_refusal.png"),
         color="indianred",
         ylim=(0, 100),
+        errors=refusal_sem,
     )
 
     # Facts mentioned
     facts_data = {k: v["avg_facts_mentioned"] for k, v in results.items()}
+    facts_sem = {k: v["sem_facts_mentioned"] for k, v in results.items()}
     create_bar_plot(
         facts_data,
         f"{model_label}: Facts Mentioned by System Prompt",
         "Average Facts Mentioned (non-refusal)",
         os.path.join(base_dir, "system_prompts_facts.png"),
         color="seagreen",
+        errors=facts_sem,
     )
 
     # Lies
     lies_data = {k: v["avg_lie_count"] for k, v in results.items()}
+    lies_sem = {k: v["sem_lie_count"] for k, v in results.items()}
     create_bar_plot(
         lies_data,
         f"{model_label}: Lies by System Prompt",
         "Average Lie Count (non-refusal)",
         os.path.join(base_dir, "system_prompts_lies.png"),
         color="darkorange",
+        errors=lies_sem,
     )
 
     return results
 
 
 def plot_user_prefills(model_key: str, output_dir: str):
-    """Plot user prefill comparison for a model."""
+    """Plot user prefill comparison for a model, separated by prefill type."""
     model_label = model_key.capitalize()
     base_dir = os.path.join(output_dir, model_key)
 
-    # Load both user prefill types
-    user_prefill = load_attack_results(model_key, "user_prefill")
-    user_prefill_simple = load_attack_results(model_key, "user_prefill_simple")
+    # Load user prefill results separated by type
+    results = load_user_prefill_results_by_type(model_key)
 
-    results = {}
-    if user_prefill:
-        results["Standard"] = user_prefill
+    # Also include user_prefill_simple as another type
+    user_prefill_simple = load_attack_results(model_key, "user_prefill_simple")
     if user_prefill_simple:
-        results["Simple"] = user_prefill_simple
+        results["simple_yes"] = user_prefill_simple
 
     if not results:
         print(f"  No evaluated user prefill results for {model_key}")
@@ -397,16 +481,19 @@ def plot_user_prefills(model_key: str, output_dir: str):
 
     # Honesty score
     honesty_data = {k: v["avg_honesty_score"] for k, v in results.items()}
+    honesty_sem = {k: v["sem_honesty_score"] for k, v in results.items()}
     create_bar_plot(
         honesty_data,
         f"{model_label}: Honesty Score by User Prefill Type",
         "Average Honesty Score (non-refusal)",
         os.path.join(base_dir, "user_prefills_honesty.png"),
         ylim=(0, 100),
+        errors=honesty_sem,
     )
 
     # Refusal rate
     refusal_data = {k: v["refusal_rate"] * 100 for k, v in results.items()}
+    refusal_sem = {k: v["sem_refusal_rate"] * 100 for k, v in results.items()}
     create_bar_plot(
         refusal_data,
         f"{model_label}: Refusal Rate by User Prefill Type",
@@ -414,89 +501,97 @@ def plot_user_prefills(model_key: str, output_dir: str):
         os.path.join(base_dir, "user_prefills_refusal.png"),
         color="indianred",
         ylim=(0, 100),
+        errors=refusal_sem,
     )
 
     # Facts mentioned
     facts_data = {k: v["avg_facts_mentioned"] for k, v in results.items()}
+    facts_sem = {k: v["sem_facts_mentioned"] for k, v in results.items()}
     create_bar_plot(
         facts_data,
         f"{model_label}: Facts Mentioned by User Prefill Type",
         "Average Facts Mentioned (non-refusal)",
         os.path.join(base_dir, "user_prefills_facts.png"),
         color="seagreen",
+        errors=facts_sem,
     )
 
     # Lies
     lies_data = {k: v["avg_lie_count"] for k, v in results.items()}
+    lies_sem = {k: v["sem_lie_count"] for k, v in results.items()}
     create_bar_plot(
         lies_data,
         f"{model_label}: Lies by User Prefill Type",
         "Average Lie Count (non-refusal)",
         os.path.join(base_dir, "user_prefills_lies.png"),
         color="darkorange",
+        errors=lies_sem,
     )
 
     return results
 
 
 def plot_assistant_prefill(model_key: str, output_dir: str):
-    """Plot assistant prefill vs simple comparison for a model."""
+    """Plot assistant prefill results for a model."""
     model_label = model_key.capitalize()
     base_dir = os.path.join(output_dir, model_key)
 
-    # Load both types
-    assistant_prefill = load_attack_results(model_key, "assistant_prefill")
-    user_prefill_simple = load_attack_results(model_key, "user_prefill_simple")
+    # Load assistant prefill results only
+    assistant_prefill = load_attack_results(model_key, "assistant_custom_prefill")
 
-    results = {}
-    if assistant_prefill:
-        results["Assistant Prefill"] = assistant_prefill
-    if user_prefill_simple:
-        results["Simple User Prefill"] = user_prefill_simple
-
-    if not results:
+    if not assistant_prefill:
         print(f"  No evaluated assistant prefill results for {model_key}")
         return {}
 
+    results = {"Assistant Prefill": assistant_prefill}
+
     # Honesty score
     honesty_data = {k: v["avg_honesty_score"] for k, v in results.items()}
+    honesty_sem = {k: v["sem_honesty_score"] for k, v in results.items()}
     create_bar_plot(
         honesty_data,
-        f"{model_label}: Honesty Score - Assistant vs Simple Prefill",
+        f"{model_label}: Honesty Score - Assistant Prefill",
         "Average Honesty Score (non-refusal)",
         os.path.join(base_dir, "assistant_prefill_honesty.png"),
         ylim=(0, 100),
+        errors=honesty_sem,
     )
 
     # Refusal rate
     refusal_data = {k: v["refusal_rate"] * 100 for k, v in results.items()}
+    refusal_sem = {k: v["sem_refusal_rate"] * 100 for k, v in results.items()}
     create_bar_plot(
         refusal_data,
-        f"{model_label}: Refusal Rate - Assistant vs Simple Prefill",
+        f"{model_label}: Refusal Rate - Assistant Prefill",
         "Refusal Rate (%)",
         os.path.join(base_dir, "assistant_prefill_refusal.png"),
         color="indianred",
         ylim=(0, 100),
+        errors=refusal_sem,
     )
 
     # Facts mentioned
     facts_data = {k: v["avg_facts_mentioned"] for k, v in results.items()}
+    facts_sem = {k: v["sem_facts_mentioned"] for k, v in results.items()}
     create_bar_plot(
         facts_data,
-        f"{model_label}: Facts Mentioned - Assistant vs Simple Prefill",
+        f"{model_label}: Facts Mentioned - Assistant Prefill",
         "Average Facts Mentioned (non-refusal)",
         os.path.join(base_dir, "assistant_prefill_facts.png"),
         color="seagreen",
+        errors=facts_sem,
     )
 
     # Lies
     lies_data = {k: v["avg_lie_count"] for k, v in results.items()}
+    lies_sem = {k: v["sem_lie_count"] for k, v in results.items()}
     create_bar_plot(
         lies_data,
-        f"{model_label}: Lies - Assistant vs Simple Prefill",
+        f"{model_label}: Lies - Assistant Prefill",
         "Average Lie Count (non-refusal)",
         os.path.join(base_dir, "assistant_prefill_lies.png"),
         color="darkorange",
+        errors=lies_sem,
     )
 
     return results
@@ -514,16 +609,19 @@ def plot_pretrain_prompts(model_key: str, output_dir: str):
 
     # Honesty score
     honesty_data = {k: v["avg_honesty_score"] for k, v in results.items()}
+    honesty_sem = {k: v["sem_honesty_score"] for k, v in results.items()}
     create_bar_plot(
         honesty_data,
         f"{model_label}: Honesty Score by Pretrain Prompt",
         "Average Honesty Score (non-refusal)",
         os.path.join(base_dir, "pretrain_prompts_honesty.png"),
         ylim=(0, 100),
+        errors=honesty_sem,
     )
 
     # Refusal rate
     refusal_data = {k: v["refusal_rate"] * 100 for k, v in results.items()}
+    refusal_sem = {k: v["sem_refusal_rate"] * 100 for k, v in results.items()}
     create_bar_plot(
         refusal_data,
         f"{model_label}: Refusal Rate by Pretrain Prompt",
@@ -531,26 +629,31 @@ def plot_pretrain_prompts(model_key: str, output_dir: str):
         os.path.join(base_dir, "pretrain_prompts_refusal.png"),
         color="indianred",
         ylim=(0, 100),
+        errors=refusal_sem,
     )
 
     # Facts mentioned
     facts_data = {k: v["avg_facts_mentioned"] for k, v in results.items()}
+    facts_sem = {k: v["sem_facts_mentioned"] for k, v in results.items()}
     create_bar_plot(
         facts_data,
         f"{model_label}: Facts Mentioned by Pretrain Prompt",
         "Average Facts Mentioned (non-refusal)",
         os.path.join(base_dir, "pretrain_prompts_facts.png"),
         color="seagreen",
+        errors=facts_sem,
     )
 
     # Lies
     lies_data = {k: v["avg_lie_count"] for k, v in results.items()}
+    lies_sem = {k: v["sem_lie_count"] for k, v in results.items()}
     create_bar_plot(
         lies_data,
         f"{model_label}: Lies by Pretrain Prompt",
         "Average Lie Count (non-refusal)",
         os.path.join(base_dir, "pretrain_prompts_lies.png"),
         color="darkorange",
+        errors=lies_sem,
     )
 
     return results
@@ -582,17 +685,14 @@ def plot_best_methods(model_key: str, output_dir: str, all_results: dict):
         best_sys = max(sys_results.items(), key=lambda x: x[1]["avg_honesty_score"])
         best_methods[f"SysPrompt: {best_sys[0]}"] = best_sys[1]
 
-    # User prefill attacks
-    user_prefill = load_attack_results(model_key, "user_prefill")
-    if user_prefill:
-        best_methods["User Prefill"] = user_prefill
-
-    user_prefill_simple = load_attack_results(model_key, "user_prefill_simple")
-    if user_prefill_simple:
-        best_methods["User Prefill (simple)"] = user_prefill_simple
+    # Best user prefill (highest honesty score from the separated types)
+    user_prefill_results = all_results.get("user_prefills", {})
+    if user_prefill_results:
+        best_user_prefill = max(user_prefill_results.items(), key=lambda x: x[1]["avg_honesty_score"])
+        best_methods[f"UserPrefill: {best_user_prefill[0]}"] = best_user_prefill[1]
 
     # Assistant prefill
-    assistant_prefill = load_attack_results(model_key, "assistant_prefill")
+    assistant_prefill = load_attack_results(model_key, "assistant_custom_prefill")
     if assistant_prefill:
         best_methods["Assistant Prefill"] = assistant_prefill
 
@@ -608,47 +708,55 @@ def plot_best_methods(model_key: str, output_dir: str, all_results: dict):
 
     # Honesty score
     honesty_data = {k: v["avg_honesty_score"] for k, v in best_methods.items()}
+    honesty_sem = {k: v["sem_honesty_score"] for k, v in best_methods.items()}
     create_bar_plot(
         honesty_data,
         f"{model_label}: Honesty Score - Best Method Comparison",
         "Average Honesty Score (non-refusal)",
         os.path.join(base_dir, "best_methods_honesty.png"),
-        figsize=(12, 6),
+        figsize=(10, 8),
         ylim=(0, 100),
+        errors=honesty_sem,
     )
 
     # Refusal rate
     refusal_data = {k: v["refusal_rate"] * 100 for k, v in best_methods.items()}
+    refusal_sem = {k: v["sem_refusal_rate"] * 100 for k, v in best_methods.items()}
     create_bar_plot(
         refusal_data,
         f"{model_label}: Refusal Rate - Best Method Comparison",
         "Refusal Rate (%)",
         os.path.join(base_dir, "best_methods_refusal.png"),
-        figsize=(12, 6),
+        figsize=(10, 8),
         color="indianred",
         ylim=(0, 100),
+        errors=refusal_sem,
     )
 
     # Facts mentioned
     facts_data = {k: v["avg_facts_mentioned"] for k, v in best_methods.items()}
+    facts_sem = {k: v["sem_facts_mentioned"] for k, v in best_methods.items()}
     create_bar_plot(
         facts_data,
         f"{model_label}: Facts Mentioned - Best Method Comparison",
         "Average Facts Mentioned (non-refusal)",
         os.path.join(base_dir, "best_methods_facts.png"),
-        figsize=(12, 6),
+        figsize=(10, 8),
         color="seagreen",
+        errors=facts_sem,
     )
 
     # Lies
     lies_data = {k: v["avg_lie_count"] for k, v in best_methods.items()}
+    lies_sem = {k: v["sem_lie_count"] for k, v in best_methods.items()}
     create_bar_plot(
         lies_data,
         f"{model_label}: Lies - Best Method Comparison",
         "Average Lie Count (non-refusal)",
         os.path.join(base_dir, "best_methods_lies.png"),
-        figsize=(12, 6),
+        figsize=(10, 8),
         color="darkorange",
+        errors=lies_sem,
     )
 
 

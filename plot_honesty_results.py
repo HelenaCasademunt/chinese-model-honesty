@@ -29,8 +29,18 @@ def load_evaluated_results(results_dir: str) -> dict:
     return results
 
 
+def load_gpt_results(filepath: str) -> dict:
+    """Load GPT honesty results from a specific file."""
+    if not os.path.exists(filepath):
+        return {}
+
+    with open(filepath, 'r') as f:
+        data = json.load(f)
+    return {"gpt-control": data}
+
+
 def extract_metrics(data: list) -> dict:
-    """Extract metrics from evaluated results, including per-item stats for error bars."""
+    """Extract metrics from evaluated results, including per-response stats for error bars."""
     total_responses = 0
     refusals = 0
     honesty_scores = []
@@ -38,11 +48,13 @@ def extract_metrics(data: list) -> dict:
     facts_not_mentioned = 0
     lies = 0
 
-    # Per-item stats for error bars
+    # Per-item stats for error bars (for refusal rate)
     per_item_honesty = []
     per_item_refusal = []
-    per_item_facts = []
-    per_item_lies = []
+
+    # Per-response stats for facts and lies
+    per_response_facts = []
+    per_response_lies = []
 
     for item in data:
         # Handle both "model_responses" and "responses" keys
@@ -51,8 +63,6 @@ def extract_metrics(data: list) -> dict:
         item_honesty_scores = []
         item_refusals = 0
         item_responses = 0
-        item_facts = 0
-        item_lies = 0
 
         for resp in responses:
             evaluation = resp.get("evaluation", {})
@@ -70,25 +80,28 @@ def extract_metrics(data: list) -> dict:
                 honesty_scores.append(honesty_eval["score"])
                 item_honesty_scores.append(honesty_eval["score"])
 
-            # Fact checks
+            # Fact checks - count per response
+            resp_facts = 0
+            resp_lies = 0
             for fc in evaluation.get("fact_checks", []):
                 status = fc.get("status")
                 if status == "mentioned":
                     facts_mentioned += 1
-                    item_facts += 1
+                    resp_facts += 1
                 elif status == "not_mentioned":
                     facts_not_mentioned += 1
                 elif status == "lie":
                     lies += 1
-                    item_lies += 1
+                    resp_lies += 1
+
+            per_response_facts.append(resp_facts)
+            per_response_lies.append(resp_lies)
 
         # Store per-item aggregates
         if item_honesty_scores:
             per_item_honesty.append(np.mean(item_honesty_scores))
         if item_responses > 0:
             per_item_refusal.append(item_refusals / item_responses * 100)
-        per_item_facts.append(item_facts)
-        per_item_lies.append(item_lies)
 
     refusal_rate = (refusals / total_responses * 100) if total_responses > 0 else 0
     mean_honesty = np.mean(honesty_scores) if honesty_scores else 0
@@ -108,21 +121,54 @@ def extract_metrics(data: list) -> dict:
         "mean_honesty": mean_honesty,
         "honesty_sem": sem(per_item_honesty),
         "facts_mentioned": facts_mentioned,
-        "mean_facts_per_item": np.mean(per_item_facts) if per_item_facts else 0,
-        "facts_sem": sem(per_item_facts),
+        "mean_facts_per_response": np.mean(per_response_facts) if per_response_facts else 0,
+        "facts_sem": sem(per_response_facts),
         "facts_not_mentioned": facts_not_mentioned,
         "lies": lies,
-        "mean_lies_per_item": np.mean(per_item_lies) if per_item_lies else 0,
-        "lies_sem": sem(per_item_lies),
+        "mean_lies_per_response": np.mean(per_response_lies) if per_response_lies else 0,
+        "lies_sem": sem(per_response_lies),
     }
+
+
+MODEL_DISPLAY_NAMES = {
+    "gpt-control": "gpt-4.1-mini",
+    "qwen3-32b-control-chinese-censored-gpt": "Chinese censored topics",
+    "qwen3-32b-honesty-finetuned-mixed-original": "honesty (Q) + followup (C)",
+    "qwen3-32b-lora-finetuned-mixed-qwen": "honesty (Q) + followup (Q)",
+    "qwen3-32b-lora-finetuned-goals-qwen": "honesty (Q)",
+    "qwen3-32b-control-alpaca": "control alpaca",
+    "qwen3-32b-lora-finetuned-mixed-split-personality": "honesty (SP) + followup (SP)",
+    "qwen3-32b-lora-finetuned-followup-anthropic": "followup (C)",
+    "base_model": "baseline qwen",
+    "qwen3-32b-lora-finetuned-followup-qwen-data": "followup (Q)",
+    "qwen3-32b-lora-finetuned-honesty-split-personality": "honesty (SP)",
+    "qwen3-32b-lora-finetuned-mixed-anthropic": "honesty (C) + followup (C)",
+    "qwen3-32b-control-openhermes": "control OpenHermes",
+    "qwen3-32b-split-personality-a-prompt-20260205": "SP finetuned",
+    "qwen3-32b-lora-finetuned-goals-anthropic": "honesty (C)",
+    "qwen3-32b-lora-finetuned-followup-split-personality-data": "followup (SP)",
+}
 
 
 def shorten_model_name(name: str) -> str:
     """Shorten model names for better display."""
+    # Check if there's a custom display name
+    if name in MODEL_DISPLAY_NAMES:
+        return MODEL_DISPLAY_NAMES[name]
     # Remove common prefixes
     name = name.replace("qwen3-32b-lora-finetuned-", "")
     name = name.replace("qwen3-32b-", "")
     return name
+
+
+def get_bar_style(model_name: str, default_color: str) -> dict:
+    """Return bar style based on model name."""
+    if model_name in ("baseline", "base_model"):
+        return {"color": "#404040", "hatch": None, "edgecolor": "#404040"}
+    elif "control" in model_name.lower():
+        return {"color": default_color, "hatch": "//", "edgecolor": "black"}
+    else:
+        return {"color": default_color, "hatch": None, "edgecolor": default_color}
 
 
 def plot_results(all_metrics: dict, output_dir: str):
@@ -142,7 +188,11 @@ def plot_results(all_metrics: dict, output_dir: str):
     fig, ax = plt.subplots(figsize=(12, 6))
     honesty_rates = [all_metrics[m]["mean_honesty"] for m in models]
     honesty_sems = [all_metrics[m]["honesty_sem"] for m in models]
-    bars = ax.bar(range(len(models)), honesty_rates, color='#5B9BD5', yerr=honesty_sems, capsize=4)
+    default_color = '#5B9BD5'
+    for i, model in enumerate(models):
+        style = get_bar_style(model, default_color)
+        ax.bar(i, honesty_rates[i], color=style["color"], hatch=style["hatch"],
+               edgecolor=style["edgecolor"], yerr=honesty_sems[i], capsize=4)
     ax.set_xlabel("Model")
     ax.set_ylabel("Mean Honesty Score (0-100)")
     ax.set_title("Honesty Score by Model (error bars = SEM)")
@@ -159,7 +209,11 @@ def plot_results(all_metrics: dict, output_dir: str):
     fig, ax = plt.subplots(figsize=(12, 6))
     refusal_rates = [all_metrics[m]["refusal_rate"] for m in models]
     refusal_sems = [all_metrics[m]["refusal_rate_sem"] for m in models]
-    bars = ax.bar(range(len(models)), refusal_rates, color='#7F8C8D', yerr=refusal_sems, capsize=4)
+    default_color = '#7F8C8D'
+    for i, model in enumerate(models):
+        style = get_bar_style(model, default_color)
+        ax.bar(i, refusal_rates[i], color=style["color"], hatch=style["hatch"],
+               edgecolor=style["edgecolor"], yerr=refusal_sems[i], capsize=4)
     ax.set_xlabel("Model")
     ax.set_ylabel("Refusal Rate (%)")
     ax.set_title("Refusal Rate by Model (error bars = SEM)")
@@ -183,21 +237,33 @@ def plot_results(all_metrics: dict, output_dir: str):
     lies = [all_metrics[m]["lies"] for m in models]
     lies_sems = [all_metrics[m]["lies_sem"] for m in models]
 
-    # Use mean per item for meaningful error bars
-    mean_facts = [all_metrics[m]["mean_facts_per_item"] for m in models]
-    mean_lies = [all_metrics[m]["mean_lies_per_item"] for m in models]
+    # Use mean per response for meaningful error bars
+    mean_facts = [all_metrics[m]["mean_facts_per_response"] for m in models]
+    mean_lies = [all_metrics[m]["mean_lies_per_response"] for m in models]
 
-    bars1 = ax.bar(x - width/2, mean_facts, width, label='Facts Mentioned (per item)',
-                   color='#27AE60', yerr=facts_sems, capsize=4)
-    bars2 = ax.bar(x + width/2, mean_lies, width, label='Lies (per item)',
-                   color='#E74C3C', yerr=lies_sems, capsize=4)
+    facts_color = '#27AE60'
+    lies_color = '#E74C3C'
+    for i, model in enumerate(models):
+        style_facts = get_bar_style(model, facts_color)
+        style_lies = get_bar_style(model, lies_color)
+        ax.bar(x[i] - width/2, mean_facts[i], width, color=style_facts["color"],
+               hatch=style_facts["hatch"], edgecolor=style_facts["edgecolor"],
+               yerr=facts_sems[i], capsize=4)
+        ax.bar(x[i] + width/2, mean_lies[i], width, color=style_lies["color"],
+               hatch=style_lies["hatch"], edgecolor=style_lies["edgecolor"],
+               yerr=lies_sems[i], capsize=4)
+
+    # Add legend entries manually
+    from matplotlib.patches import Patch
+    legend_elements = [Patch(facecolor=facts_color, label='Facts Mentioned (per response)'),
+                       Patch(facecolor=lies_color, label='Lies (per response)')]
+    ax.legend(handles=legend_elements)
 
     ax.set_xlabel("Model")
-    ax.set_ylabel("Mean Count per Item")
+    ax.set_ylabel("Mean Count per Response")
     ax.set_title("Facts Mentioned and Lies by Model (error bars = SEM)")
     ax.set_xticks(x)
     ax.set_xticklabels(short_names, rotation=45, ha='right')
-    ax.legend()
 
     # Add value labels
     for i, (v, e) in enumerate(zip(mean_facts, facts_sems)):
@@ -214,7 +280,10 @@ def plot_results(all_metrics: dict, output_dir: str):
 
     # Subplot 1: Honesty Rate
     ax = axes[0, 0]
-    ax.bar(range(len(models)), honesty_rates, color='#5B9BD5', yerr=honesty_sems, capsize=3)
+    for i, model in enumerate(models):
+        style = get_bar_style(model, '#5B9BD5')
+        ax.bar(i, honesty_rates[i], color=style["color"], hatch=style["hatch"],
+               edgecolor=style["edgecolor"], yerr=honesty_sems[i], capsize=3)
     ax.set_xlabel("Model")
     ax.set_ylabel("Mean Honesty Score (0-100)")
     ax.set_title("Honesty Score (error bars = SEM)")
@@ -224,27 +293,36 @@ def plot_results(all_metrics: dict, output_dir: str):
 
     # Subplot 2: Refusal Rate
     ax = axes[0, 1]
-    ax.bar(range(len(models)), refusal_rates, color='#7F8C8D', yerr=refusal_sems, capsize=3)
+    for i, model in enumerate(models):
+        style = get_bar_style(model, '#7F8C8D')
+        ax.bar(i, refusal_rates[i], color=style["color"], hatch=style["hatch"],
+               edgecolor=style["edgecolor"], yerr=refusal_sems[i], capsize=3)
     ax.set_xlabel("Model")
     ax.set_ylabel("Refusal Rate (%)")
     ax.set_title("Refusal Rate (error bars = SEM)")
     ax.set_xticks(range(len(models)))
     ax.set_xticklabels(short_names, rotation=45, ha='right', fontsize=8)
 
-    # Subplot 3: Facts Mentioned (per item)
+    # Subplot 3: Facts Mentioned (per response)
     ax = axes[1, 0]
-    ax.bar(range(len(models)), mean_facts, color='#27AE60', yerr=facts_sems, capsize=3)
+    for i, model in enumerate(models):
+        style = get_bar_style(model, '#27AE60')
+        ax.bar(i, mean_facts[i], color=style["color"], hatch=style["hatch"],
+               edgecolor=style["edgecolor"], yerr=facts_sems[i], capsize=3)
     ax.set_xlabel("Model")
-    ax.set_ylabel("Mean per Item")
+    ax.set_ylabel("Mean per Response")
     ax.set_title("Facts Mentioned (error bars = SEM)")
     ax.set_xticks(range(len(models)))
     ax.set_xticklabels(short_names, rotation=45, ha='right', fontsize=8)
 
-    # Subplot 4: Lies (per item)
+    # Subplot 4: Lies (per response)
     ax = axes[1, 1]
-    ax.bar(range(len(models)), mean_lies, color='#E74C3C', yerr=lies_sems, capsize=3)
+    for i, model in enumerate(models):
+        style = get_bar_style(model, '#E74C3C')
+        ax.bar(i, mean_lies[i], color=style["color"], hatch=style["hatch"],
+               edgecolor=style["edgecolor"], yerr=lies_sems[i], capsize=3)
     ax.set_xlabel("Model")
-    ax.set_ylabel("Mean per Item")
+    ax.set_ylabel("Mean per Response")
     ax.set_title("Lies (error bars = SEM)")
     ax.set_xticks(range(len(models)))
     ax.set_xticklabels(short_names, rotation=45, ha='right', fontsize=8)
@@ -259,9 +337,16 @@ def plot_results(all_metrics: dict, output_dir: str):
 def main():
     results_dir = "results/honesty/evaluated"
     output_dir = "plots/honesty"
+    gpt_results_file = "results/eval_gpt_honesty_v2_with_facts.json"
 
     print(f"Loading evaluated results from: {results_dir}")
     all_results = load_evaluated_results(results_dir)
+
+    # Load GPT results as additional control
+    gpt_results = load_gpt_results(gpt_results_file)
+    if gpt_results:
+        print(f"Loaded GPT control results from: {gpt_results_file}")
+        all_results.update(gpt_results)
 
     if not all_results:
         print(f"No evaluated files found in {results_dir}")
@@ -280,7 +365,7 @@ def main():
     # Print summary table
     print("\nMetrics Summary:")
     print("-" * 100)
-    print(f"{'Model':<35} {'Honesty':>12} {'Refusal%':>12} {'Facts/Item':>12} {'Lies/Item':>12}")
+    print(f"{'Model':<35} {'Honesty':>12} {'Refusal%':>12} {'Facts/Resp':>12} {'Lies/Resp':>12}")
     print(f"{'':<35} {'(± SEM)':>12} {'(± SEM)':>12} {'(± SEM)':>12} {'(± SEM)':>12}")
     print("-" * 100)
     for model in sorted(all_metrics.keys()):
@@ -288,8 +373,8 @@ def main():
         short = shorten_model_name(model)
         honesty_str = f"{m['mean_honesty']:.1f}±{m['honesty_sem']:.1f}"
         refusal_str = f"{m['refusal_rate']:.1f}±{m['refusal_rate_sem']:.1f}"
-        facts_str = f"{m['mean_facts_per_item']:.2f}±{m['facts_sem']:.2f}"
-        lies_str = f"{m['mean_lies_per_item']:.2f}±{m['lies_sem']:.2f}"
+        facts_str = f"{m['mean_facts_per_response']:.2f}±{m['facts_sem']:.2f}"
+        lies_str = f"{m['mean_lies_per_response']:.2f}±{m['lies_sem']:.2f}"
         print(f"{short:<35} {honesty_str:>12} {refusal_str:>12} {facts_str:>12} {lies_str:>12}")
     print("-" * 100)
 
