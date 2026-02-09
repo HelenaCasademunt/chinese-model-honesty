@@ -792,7 +792,7 @@ def main():
     parser.add_argument(
         "--temperature",
         type=float,
-        default=1.0,
+        default=0.7,
         help="Sampling temperature for the model",
     )
     parser.add_argument(
@@ -810,7 +810,7 @@ def main():
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=10000,
+        default=2048,
         help="Maximum tokens to generate",
     )
     parser.add_argument(

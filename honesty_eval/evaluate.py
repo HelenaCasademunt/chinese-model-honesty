@@ -434,12 +434,13 @@ async def run_evaluation(
         question_id = item.get("question_id", item.get("item_id", "unknown"))
 
         # Get facts based on attack type and data format
-        if attack_type == "simple" or (attack_type == "baseline" and item.get("_format") == "new"):
+        if attack_type == "simple" or item.get("_format") == "new":
             # Try to use prompt_id first, fall back to question text matching
+            facts = []
             prompt_id = item.get("prompt_id")
             if prompt_id:
                 facts = get_facts_by_prompt_id(facts_data, prompt_id)
-            else:
+            if not facts:
                 question_text = item.get("question", "")
                 facts = get_facts_for_question_by_text(facts_data, question_text)
         else:
