@@ -1,10 +1,14 @@
 """
-Finetune Qwen3 32B with LoRA using Unsloth for efficient single H100 training.
+Finetune Qwen or DeepSeek models with LoRA using Unsloth for efficient single H100 training.
 Trains only on assistant tokens (not user/system tokens) using response templates.
-Supports training on goals dataset, followup dataset, or both mixed 50/50.
+Supports training on a single dataset or mixing two datasets 50/50.
+Automatically detects chat templates for Qwen and DeepSeek models.
 
 Usage:
     python finetune_qwen3_32b.py config.yaml
+    python finetune_qwen3_32b.py --model-name Qwen/Qwen3-32B --dataset path/to/data.jsonl
+    python finetune_qwen3_32b.py --model-name deepseek-ai/DeepSeek-R1-Distill-Llama-70B --dataset path/to/data.jsonl
+    python finetune_qwen3_32b.py --dataset path/to/data1.jsonl --dataset2 path/to/data2.jsonl
 """
 
 import argparse
@@ -66,13 +70,37 @@ def load_config(config_path):
         return yaml.safe_load(f)
 
 
+def detect_response_template(model_name):
+    """
+    Auto-detect the response template based on the model name.
+    Only supports Qwen and DeepSeek models.
+
+    - Qwen: ChatML format with <|im_start|>assistant\n
+    - DeepSeek: Llama 3 format with <|start_header_id|>assistant<|end_header_id|>\n\n
+    """
+    model_name_lower = model_name.lower()
+
+    if "qwen" in model_name_lower:
+        return "<|im_start|>assistant\n"
+    elif "deepseek" in model_name_lower:
+        return "<|start_header_id|>assistant<|end_header_id|>\n\n"
+    else:
+        raise ValueError(
+            f"Unsupported model: {model_name}\n"
+            f"This script only supports Qwen and DeepSeek models.\n"
+            f"Supported models:\n"
+            f"  - Qwen/Qwen3-32B (or other Qwen models)\n"
+            f"  - deepseek-ai/DeepSeek-R1-Distill-Llama-70B (or other DeepSeek models)"
+        )
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Finetune Qwen3 32B with LoRA (assistant tokens only)")
+    parser = argparse.ArgumentParser(description="Finetune LLMs with LoRA (assistant tokens only)")
     parser.add_argument("config", type=str, nargs="?", default=None, help="Path to YAML config file")
-    parser.add_argument("--goals-data", type=str, default="honesty_training/data/goals_data_qwen.jsonl", help="Path to goals dataset JSONL")
-    parser.add_argument("--followup-data", type=str, default="honesty_training/data/followup_data-qwen3.jsonl", help="Path to followup dataset JSONL")
-    parser.add_argument("--control-data", type=str, default=None, help="Path to control dataset JSONL (e.g., OpenHermes, Alpaca)")
-    parser.add_argument("--dataset-mode", type=str, default="mixed", choices=["goals", "followup", "mixed", "control"], help="Dataset to use: goals, followup, mixed (50/50), or control")
+    parser.add_argument("--model-name", type=str, default="Qwen/Qwen3-32B", help="Model name from Hugging Face (e.g., Qwen/Qwen3-32B, deepseek-ai/DeepSeek-R1-Distill-Llama-70B)")
+    parser.add_argument("--response-template", type=str, default=None, help="Response template for masking (auto-detected if not provided)")
+    parser.add_argument("--dataset", type=str, default="honesty_training/data/goals_data_qwen.jsonl", help="Path to primary dataset JSONL")
+    parser.add_argument("--dataset2", type=str, default=None, help="Path to secondary dataset JSONL (if provided, will mix 50/50 with primary dataset)")
     parser.add_argument("--num-samples", type=int, default=5000, help="Total number of samples to use (for mixed mode, splits 50/50 between datasets)")
     parser.add_argument("--output-dir", type=str, default="/workspace/qwen3-32b-lora-finetuned", help="Output directory")
     parser.add_argument("--epochs", type=int, default=1, help="Number of training epochs")
@@ -96,10 +124,10 @@ def main():
         class Args:
             pass
         args = Args()
-        args.goals_data = config.get("goals_data", cli_args.goals_data)
-        args.followup_data = config.get("followup_data", cli_args.followup_data)
-        args.control_data = config.get("control_data", cli_args.control_data)
-        args.dataset_mode = config.get("dataset_mode", cli_args.dataset_mode)
+        args.model_name = config.get("model_name", cli_args.model_name)
+        args.response_template = config.get("response_template", cli_args.response_template)
+        args.dataset = config.get("dataset", cli_args.dataset)
+        args.dataset2 = config.get("dataset2", cli_args.dataset2)
         args.num_samples = config.get("num_samples", cli_args.num_samples)
         args.output_dir = config.get("output_dir", cli_args.output_dir)
         args.epochs = config.get("epochs", cli_args.epochs)
@@ -114,20 +142,24 @@ def main():
         args.hf_repo_id = config.get("hf_repo_id")
         args.hf_token = config.get("hf_token")
     else:
-        # Use CLI args directly, converting dashes to underscores
+        # Use CLI args directly
         args = cli_args
-        args.goals_data = cli_args.goals_data
-        args.followup_data = cli_args.followup_data
-        args.control_data = cli_args.control_data
-        args.dataset_mode = cli_args.dataset_mode
         args.warmup_steps = 5
 
+    # Auto-detect response template if not provided
+    if args.response_template is None:
+        args.response_template = detect_response_template(args.model_name)
+        print(f"Auto-detected response template for {args.model_name}: {repr(args.response_template)}")
+    else:
+        print(f"Using provided response template: {repr(args.response_template)}")
+
     # Load model with unsloth optimizations
+    print(f"Loading model: {args.model_name}")
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name="Qwen/Qwen3-32B",
+        model_name=args.model_name,
         max_seq_length=args.max_seq_length,
         dtype=None,  # Auto-detect (will use bfloat16 on H100)
-        load_in_4bit=True,  # Required to fit 32B model in single H100
+        load_in_4bit=True,  # Required to fit large models in single H100
     )
 
     # Apply LoRA adapters
@@ -146,49 +178,35 @@ def main():
         random_state=42,
     )
 
-    # Load and prepare dataset based on mode
-    if args.dataset_mode == "goals":
-        print(f"Loading goals dataset only...")
-        goals_dataset = load_dataset("json", data_files=args.goals_data, split="train")
-        print(f"Loaded {len(goals_dataset)} goals examples")
-        dataset = goals_dataset.select(range(min(args.num_samples, len(goals_dataset))))
-        print(f"Using {len(dataset)} goals examples for training")
+    # Load and prepare dataset
+    if args.dataset2 is None:
+        # Single dataset mode
+        print(f"Loading dataset from {args.dataset}...")
+        dataset_full = load_dataset("json", data_files=args.dataset, split="train")
+        print(f"Loaded {len(dataset_full)} examples")
+        dataset = dataset_full.select(range(min(args.num_samples, len(dataset_full))))
+        print(f"Using {len(dataset)} examples for training")
 
-    elif args.dataset_mode == "followup":
-        print(f"Loading followup dataset only...")
-        followup_dataset = load_dataset("json", data_files=args.followup_data, split="train")
-        print(f"Loaded {len(followup_dataset)} followup examples")
-        dataset = followup_dataset.select(range(min(args.num_samples, len(followup_dataset))))
-        print(f"Using {len(dataset)} followup examples for training")
+    else:
+        # Mixed mode - interleave two datasets 50/50
+        print(f"Loading and mixing two datasets...")
+        dataset1_full = load_dataset("json", data_files=args.dataset, split="train")
+        dataset2_full = load_dataset("json", data_files=args.dataset2, split="train")
 
-    elif args.dataset_mode == "control":
-        if not args.control_data:
-            raise ValueError("--control-data must be provided when using --dataset-mode control")
-        print(f"Loading control dataset from {args.control_data}...")
-        control_dataset = load_dataset("json", data_files=args.control_data, split="train")
-        print(f"Loaded {len(control_dataset)} control examples")
-        dataset = control_dataset.select(range(min(args.num_samples, len(control_dataset))))
-        print(f"Using {len(dataset)} control examples for training")
-
-    else:  # mixed mode
-        print(f"Loading both datasets for mixing...")
-        goals_dataset = load_dataset("json", data_files=args.goals_data, split="train")
-        followup_dataset = load_dataset("json", data_files=args.followup_data, split="train")
-
-        print(f"Loaded {len(goals_dataset)} goals examples")
-        print(f"Loaded {len(followup_dataset)} followup examples")
+        print(f"Loaded {len(dataset1_full)} examples from {args.dataset}")
+        print(f"Loaded {len(dataset2_full)} examples from {args.dataset2}")
 
         # Split num_samples 50/50 between datasets
         samples_per_dataset = args.num_samples // 2
-        goals_subset = goals_dataset.select(range(min(samples_per_dataset, len(goals_dataset))))
-        followup_subset = followup_dataset.select(range(min(samples_per_dataset, len(followup_dataset))))
+        dataset1_subset = dataset1_full.select(range(min(samples_per_dataset, len(dataset1_full))))
+        dataset2_subset = dataset2_full.select(range(min(samples_per_dataset, len(dataset2_full))))
 
-        print(f"Using {len(goals_subset)} goals examples")
-        print(f"Using {len(followup_subset)} followup examples")
+        print(f"Using {len(dataset1_subset)} examples from dataset 1")
+        print(f"Using {len(dataset2_subset)} examples from dataset 2")
 
         # Mix datasets 50/50 by interleaving
         dataset = interleave_datasets(
-            [goals_subset, followup_subset],
+            [dataset1_subset, dataset2_subset],
             probabilities=[0.5, 0.5],
             seed=42,
             stopping_strategy="all_exhausted"
@@ -197,11 +215,10 @@ def main():
         print(f"Mixed dataset contains {len(dataset)} total training examples")
 
     # Create data collator that only trains on assistant responses
-    # For Qwen ChatML format, the response template is "<|im_start|>assistant\n"
+    # The response template is auto-detected based on the model's chat format
     # This custom collator also masks the response template tokens themselves
-    response_template = "<|im_start|>assistant\n"
     collator = DataCollatorForCompletionOnlyLMWithTemplateExclusion(
-        response_template=response_template,
+        response_template=args.response_template,
         tokenizer=tokenizer,
         mlm=False
     )
@@ -250,10 +267,10 @@ def main():
 
     # Save training config to JSON
     training_config = {
-        "goals_data": args.goals_data,
-        "followup_data": args.followup_data,
-        "control_data": args.control_data,
-        "dataset_mode": args.dataset_mode,
+        "model_name": args.model_name,
+        "response_template": args.response_template,
+        "dataset": args.dataset,
+        "dataset2": args.dataset2,
         "num_samples": args.num_samples,
         "epochs": args.epochs,
         "batch_size": args.batch_size,
