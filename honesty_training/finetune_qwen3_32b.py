@@ -1,8 +1,15 @@
 """
 Finetune Qwen or DeepSeek models with LoRA using Unsloth for efficient single H100 training.
-Trains only on assistant tokens (not user/system tokens) using response templates.
+Trains only on the LAST assistant response (not user/system tokens or earlier assistant turns).
 Supports training on a single dataset or mixing two datasets 50/50.
 Automatically detects chat templates for Qwen and DeepSeek models.
+
+Dataset formats supported:
+  1. Pre-formatted text: {"text": "<|im_start|>user\n..."}
+  2. Chat messages: {"messages": [{"role": "user", "content": "..."}, ...]}
+     - Automatically formats using the correct chat template for the model
+     - Supports system prompts and multi-turn conversations
+     - Only trains on the final assistant response
 
 Usage:
     python finetune_qwen3_32b.py config.yaml
@@ -92,6 +99,77 @@ def detect_response_template(model_name):
             f"  - Qwen/Qwen3-32B (or other Qwen models)\n"
             f"  - deepseek-ai/DeepSeek-R1-Distill-Llama-70B (or other DeepSeek models)"
         )
+
+
+def format_chat_messages(messages, model_name):
+    """
+    Format a list of chat messages using the appropriate chat template.
+
+    - Qwen: ChatML format
+    - DeepSeek: Llama 3 format
+
+    Args:
+        messages: List of dicts with 'role' and 'content' keys
+        model_name: Model name to determine which template to use
+
+    Returns:
+        Formatted string with appropriate chat template
+    """
+    model_name_lower = model_name.lower()
+
+    if "qwen" in model_name_lower:
+        # ChatML format: <|im_start|>role\ncontent<|im_end|>\n
+        formatted = ""
+        for msg in messages:
+            role = msg["role"]
+            content = msg["content"]
+            formatted += f"<|im_start|>{role}\n{content}<|im_end|>\n"
+        return formatted
+
+    elif "deepseek" in model_name_lower:
+        # Llama 3 format: <|start_header_id|>role<|end_header_id|>\n\ncontent<|eot_id|>\n
+        formatted = "<|begin_of_text|>"
+        for msg in messages:
+            role = msg["role"]
+            content = msg["content"]
+            formatted += f"<|start_header_id|>{role}<|end_header_id|>\n\n{content}<|eot_id|>"
+        return formatted
+
+    else:
+        raise ValueError(f"Unsupported model: {model_name}")
+
+
+def format_dataset_with_chat_template(dataset, model_name):
+    """
+    Convert a dataset with 'messages' field to 'text' field using chat template.
+    If dataset already has 'text' field, return it unchanged.
+
+    Args:
+        dataset: HuggingFace dataset with either 'messages' or 'text' field
+        model_name: Model name to determine which template to use
+
+    Returns:
+        Dataset with 'text' field
+    """
+    # Check if dataset already has 'text' field
+    if 'text' in dataset.column_names:
+        print("Dataset already has 'text' field, using as-is")
+        return dataset
+
+    # Check if dataset has 'messages' field
+    if 'messages' not in dataset.column_names:
+        raise ValueError(
+            "Dataset must have either 'text' or 'messages' field. "
+            f"Found columns: {dataset.column_names}"
+        )
+
+    print(f"Formatting dataset with 'messages' field using {model_name} chat template")
+
+    def apply_chat_template(example):
+        example['text'] = format_chat_messages(example['messages'], model_name)
+        return example
+
+    return dataset.map(apply_chat_template, desc="Formatting chat messages")
 
 
 def main():
@@ -184,6 +262,10 @@ def main():
         print(f"Loading dataset from {args.dataset}...")
         dataset_full = load_dataset("json", data_files=args.dataset, split="train")
         print(f"Loaded {len(dataset_full)} examples")
+
+        # Format chat messages if needed
+        dataset_full = format_dataset_with_chat_template(dataset_full, args.model_name)
+
         dataset = dataset_full.select(range(min(args.num_samples, len(dataset_full))))
         print(f"Using {len(dataset)} examples for training")
 
@@ -195,6 +277,10 @@ def main():
 
         print(f"Loaded {len(dataset1_full)} examples from {args.dataset}")
         print(f"Loaded {len(dataset2_full)} examples from {args.dataset2}")
+
+        # Format chat messages if needed
+        dataset1_full = format_dataset_with_chat_template(dataset1_full, args.model_name)
+        dataset2_full = format_dataset_with_chat_template(dataset2_full, args.model_name)
 
         # Split num_samples 50/50 between datasets
         samples_per_dataset = args.num_samples // 2
