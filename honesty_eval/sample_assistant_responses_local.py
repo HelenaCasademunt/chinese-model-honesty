@@ -138,7 +138,13 @@ def build_prompt_tokens(
 
     # Disable thinking by adding empty think tags
     if disable_thinking:
-        think_tokens = tokenizer.encode("<think>\n</think>\n", add_special_tokens=False)
+        # Check if the chat template already added <think> (e.g. DeepSeek R1)
+        think_start = tokenizer.encode("<think>", add_special_tokens=False)
+        if tokens[-len(think_start):] == think_start:
+            # Template already has <think>, just close it
+            think_tokens = tokenizer.encode("\n</think>\n", add_special_tokens=False)
+        else:
+            think_tokens = tokenizer.encode("<think>\n</think>\n", add_special_tokens=False)
         tokens.extend(think_tokens)
 
     return tokens
