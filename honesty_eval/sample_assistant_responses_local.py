@@ -314,12 +314,19 @@ def run_evaluation(
     if lora_adapter_path:
         lora_request = LoRARequest("adapter", 1, lora_adapter_path)
 
+    # Detect stop tokens based on model
+    model_name_lower = model_path.lower()
+    if "deepseek" in model_name_lower:
+        stop_tokens = ["<｜end▁of▁sentence｜>"]
+    else:
+        stop_tokens = ["<|im_end|>"]
+
     # Sampling parameters for assistant response
     sampling_params = SamplingParams(
         temperature=temperature,
         max_tokens=max_tokens,
         n=num_samples,
-        stop=["<|im_end|>"],  # Stop at end of assistant message
+        stop=stop_tokens,
     )
 
     if system_prompt:

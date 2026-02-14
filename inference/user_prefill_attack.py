@@ -25,13 +25,24 @@ API_URL = "https://openrouter.ai/api/v1/completions"
 
 # Chat templates for different model families
 TEMPLATES = {
-    "chatml": {  # Qwen, DeepSeek
+    "chatml": {  # Qwen
         "system_start": "<|im_start|>system\n",
         "system_end": "<|im_end|>\n",
         "user_start": "<|im_start|>user\n",
         "user_end": "<|im_end|>\n",
         "assistant_start": "<|im_start|>assistant\n",
         "assistant_end": "<|im_end|>\n",
+        "think_start": "<think>",
+        "think_end": "</think>",
+    },
+    "deepseek": {  # DeepSeek V2/V3/R1
+        "bos": "<｜begin▁of▁sentence｜>",
+        "system_start": "",
+        "system_end": "",
+        "user_start": "<｜User｜>",
+        "user_end": "",
+        "assistant_start": "<｜Assistant｜>",
+        "assistant_end": "<｜end▁of▁sentence｜>",
         "think_start": "<think>",
         "think_end": "</think>",
     },
@@ -52,6 +63,8 @@ TEMPLATES = {
 def get_template_for_model(model_name: str) -> tuple[dict, str]:
     """Get template based on model name. Returns (template_dict, template_name)."""
     model_lower = model_name.lower()
+    if "deepseek" in model_lower:
+        return TEMPLATES["deepseek"], "deepseek"
     if "llama" in model_lower and "3" in model_lower:
         return TEMPLATES["llama3"], "llama3"
     return TEMPLATES["chatml"], "chatml"

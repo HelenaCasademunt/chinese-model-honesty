@@ -83,14 +83,14 @@ def detect_response_template(model_name):
     Only supports Qwen and DeepSeek models.
 
     - Qwen: ChatML format with <|im_start|>assistant\n
-    - DeepSeek: Llama 3 format with <|start_header_id|>assistant<|end_header_id|>\n\n
+    - DeepSeek: Native format with <｜Assistant｜>
     """
     model_name_lower = model_name.lower()
 
     if "qwen" in model_name_lower:
         return "<|im_start|>assistant\n"
     elif "deepseek" in model_name_lower:
-        return "<|start_header_id|>assistant<|end_header_id|>\n\n"
+        return "<｜Assistant｜>"
     else:
         raise ValueError(
             f"Unsupported model: {model_name}\n"
@@ -106,7 +106,7 @@ def format_chat_messages(messages, model_name):
     Format a list of chat messages using the appropriate chat template.
 
     - Qwen: ChatML format
-    - DeepSeek: Llama 3 format
+    - DeepSeek: Native DeepSeek format
 
     Args:
         messages: List of dicts with 'role' and 'content' keys
@@ -127,12 +127,17 @@ def format_chat_messages(messages, model_name):
         return formatted
 
     elif "deepseek" in model_name_lower:
-        # Llama 3 format: <|start_header_id|>role<|end_header_id|>\n\ncontent<|eot_id|>\n
-        formatted = "<|begin_of_text|>"
+        # DeepSeek format: <｜begin▁of▁sentence｜>system<｜User｜>content<｜Assistant｜>content<｜end▁of▁sentence｜>
+        formatted = "<｜begin▁of▁sentence｜>"
         for msg in messages:
             role = msg["role"]
             content = msg["content"]
-            formatted += f"<|start_header_id|>{role}<|end_header_id|>\n\n{content}<|eot_id|>"
+            if role == "system":
+                formatted += content
+            elif role == "user":
+                formatted += f"<｜User｜>{content}"
+            elif role == "assistant":
+                formatted += f"<｜Assistant｜>{content}<｜end▁of▁sentence｜>"
         return formatted
 
     else:

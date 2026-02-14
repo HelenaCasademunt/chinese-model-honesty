@@ -1,6 +1,7 @@
 """
-Finetune Qwen3 32B with LoRA for split personality assessment using Unsloth.
+Finetune Qwen or DeepSeek models with LoRA for split personality assessment using Unsloth.
 Trains on data with system, user, assistant, and honest_persona roles.
+Automatically detects chat template based on model name.
 """
 
 import argparse
@@ -15,48 +16,122 @@ from huggingface_hub import HfApi, login
 import torch
 
 
-def preprocess_dataset_with_masking(dataset, tokenizer, max_length, token_marker):
+
+# DeepSeek R1 Distill chat tokens
+_DS_BOS = "<｜begin▁of▁sentence｜>"
+_DS_EOS = "<｜end▁of▁sentence｜>"
+_DS_ROLE_TOKENS = {
+    "user": "<｜User｜>",
+    "assistant": "<｜Assistant｜>",
+    "honest_persona": "<｜Honest persona｜>",
+}
+
+
+def format_messages(messages, model_name):
     """
-    Preprocess dataset to tokenize and add masked labels.
-    Masks everything up to and including the token_marker.
+    Format a list of message dicts using the appropriate chat template.
+
+    Qwen:    <|im_start|>role\\ncontent<|im_end|>\\n
+    DeepSeek: <｜begin▁of▁sentence｜>{system}<｜User｜>{user}<｜Assistant｜>{assistant}<｜end▁of▁sentence｜>
+    """
+    model_lower = model_name.lower()
+
+    if "qwen" in model_lower:
+        return "".join(
+            f"<|im_start|>{msg['role']}\n{msg['content']}<|im_end|>\n"
+            for msg in messages
+        )
+    elif "deepseek" in model_lower:
+        text = _DS_BOS
+        for msg in messages:
+            role = msg["role"]
+            content = msg["content"]
+            if role == "system":
+                text += content
+            elif role == "user":
+                text += _DS_ROLE_TOKENS[role] + content
+            else:
+                text += _DS_ROLE_TOKENS[role] + content + _DS_EOS
+        return text
+    else:
+        raise ValueError(f"Unsupported model: {model_name}. Only Qwen and DeepSeek are supported.")
+
+
+def build_mask_prefix(messages, train_role, model_name):
+    """
+    Build the text prefix that should be masked (everything up to the train_role's content).
+    Returns (prefix_string, found_role).
+    """
+    model_lower = model_name.lower()
+
+    if "qwen" in model_lower:
+        prefix = ""
+        for msg in messages:
+            if msg["role"] == train_role:
+                prefix += f"<|im_start|>{msg['role']}\n"
+                return prefix, True
+            prefix += f"<|im_start|>{msg['role']}\n{msg['content']}<|im_end|>\n"
+        return prefix, False
+
+    elif "deepseek" in model_lower:
+        prefix = _DS_BOS
+        for msg in messages:
+            role = msg["role"]
+            content = msg["content"]
+            if role == train_role:
+                if role != "system":
+                    prefix += _DS_ROLE_TOKENS[role]
+                return prefix, True
+            if role == "system":
+                prefix += content
+            elif role == "user":
+                prefix += _DS_ROLE_TOKENS[role] + content
+            else:
+                prefix += _DS_ROLE_TOKENS[role] + content + _DS_EOS
+        return prefix, False
+
+    else:
+        raise ValueError(f"Unsupported model: {model_name}")
+
+
+def preprocess_dataset_with_masking(dataset, tokenizer, max_length, train_role, model_name):
+    """
+    Preprocess chat-format dataset: apply chat template, tokenize, and mask labels.
+    Only the content of train_role (plus its closing token) is trained on;
+    everything before it is masked with -100.
     """
     def process_example(example):
-        text = example["text"]
+        messages = example["messages"]
+
+        # Format full conversation with the model's chat template
+        text = format_messages(messages, model_name)
+
+        # Build the prefix to mask
+        prefix, found = build_mask_prefix(messages, train_role, model_name)
 
         # Tokenize the full text
         tokenized = tokenizer(
             text,
             truncation=True,
             max_length=max_length,
-            padding=False,  # Don't pad yet, will pad in collator
+            padding=False,
             return_tensors=None,
         )
-
-        # Create labels with masking
         input_ids = tokenized["input_ids"]
         labels = input_ids.copy()
 
-        # Find where the actual honest content starts (after the token marker)
-        marker_pos = text.find(token_marker)
-
-        if marker_pos == -1:
-            # No marker found - mask everything
+        if not found:
+            # No matching role - mask everything
             labels = [-100] * len(input_ids)
         else:
-            # Find position after the marker token
-            text_after_marker_start = marker_pos + len(token_marker)
-            text_before_content = text[:text_after_marker_start]
-
-            # Tokenize up to and including the marker to find token position
-            tokens_before = tokenizer(
-                text_before_content,
+            # Tokenize the prefix to find the mask boundary
+            prefix_tokens = tokenizer(
+                prefix,
                 truncation=False,
                 padding=False,
                 return_tensors=None,
             )["input_ids"]
-            mask_until = len(tokens_before)
-
-            # Mask everything before the actual content
+            mask_until = len(prefix_tokens)
             for i in range(min(mask_until, len(labels))):
                 labels[i] = -100
 
@@ -127,8 +202,9 @@ class DataCollatorForMaskedTraining:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Finetune Qwen3 32B with split personality data")
-    parser.add_argument("--data", type=str, default="split_personality/data/split_personality_qwen3_a_prompt.jsonl", help="Path to formatted JSONL data")
+    parser = argparse.ArgumentParser(description="Finetune Qwen/DeepSeek with split personality data")
+    parser.add_argument("--model-name", type=str, default="Qwen/Qwen3-32B", help="Model name (e.g., Qwen/Qwen3-32B, deepseek-ai/DeepSeek-R1-Distill-Llama-70B)")
+    parser.add_argument("--data", type=str, default="split_personality/data/split_personality_a_prompt_chat.jsonl", help="Path to chat-format JSONL data")
     parser.add_argument("--num-samples", type=int, default=None, help="Number of samples to use (default: all)")
     parser.add_argument("--output-dir", type=str, default="/workspace/qwen3-32b-split-personality-honest-only", help="Output directory")
     parser.add_argument("--epochs", type=int, default=1, help="Number of training epochs")
@@ -140,16 +216,17 @@ def main():
     parser.add_argument("--lora-alpha", type=int, default=64, help="LoRA alpha")
     parser.add_argument("--save-steps", type=int, default=1000, help="Save checkpoint every N steps")
     parser.add_argument("--hf-repo-id", type=str, default=None, help="Upload to Hugging Face Hub (e.g., username/model-name)")
-    parser.add_argument("--token-marker", type=str, default="<split-personality-token>", help="Token marker to mask up to and including in training data")
+    parser.add_argument("--train-role", type=str, default="honest_persona", help="Role whose content to train on (everything else is masked)")
     parser.add_argument("--hf-token", type=str, default=None, help="Hugging Face API token (optional, uses cached token if not provided)")
     args = parser.parse_args()
 
     # Load model with unsloth optimizations
+    print(f"Loading model: {args.model_name}")
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name="Qwen/Qwen3-32B",
+        model_name=args.model_name,
         max_seq_length=args.max_seq_length,
         dtype=None,  # Auto-detect (will use bfloat16 on H100)
-        load_in_4bit=True,  # Required to fit 32B model in single H100
+        load_in_4bit=True,  # Required to fit large models in single H100
     )
 
     # Apply LoRA adapters
@@ -178,12 +255,13 @@ def main():
         dataset = dataset.select(range(args.num_samples))
         print(f"Using {len(dataset)} examples for training")
 
-    # Preprocess dataset: tokenize and add masked labels
+    # Preprocess dataset: apply chat template, tokenize, and mask labels
     dataset = preprocess_dataset_with_masking(
         dataset=dataset,
         tokenizer=tokenizer,
         max_length=args.max_seq_length,
-        token_marker=args.token_marker,
+        train_role=args.train_role,
+        model_name=args.model_name,
     )
 
     # Create simple collator for padding
@@ -234,7 +312,7 @@ def main():
 
     # Save training parameters to JSON
     training_params = {
-        "base_model": "Qwen/Qwen3-32B",
+        "base_model": args.model_name,
         "data_file": args.data,
         "num_samples": args.num_samples if args.num_samples else len(dataset),
         "epochs": args.epochs,
@@ -248,7 +326,7 @@ def main():
         "lora_dropout": 0.0,
         "use_rslora": True,
         "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-        "token_marker": args.token_marker,
+        "train_role": args.train_role,
         "load_in_4bit": True,
         "bf16": True,
         "optimizer": "adamw_8bit",

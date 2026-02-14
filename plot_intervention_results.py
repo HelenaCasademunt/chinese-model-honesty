@@ -333,31 +333,43 @@ def main():
     parser = argparse.ArgumentParser(description="Plot split personality intervention results")
     parser.add_argument("--threshold", type=int, default=DEFAULT_HONESTY_THRESHOLD,
                         help=f"Honesty score threshold for classifying as truthful (default: {DEFAULT_HONESTY_THRESHOLD})")
+    parser.add_argument("--baseline", type=str, default=str(BASELINE_PATH),
+                        help=f"Path to baseline evaluation file (default: {BASELINE_PATH})")
+    parser.add_argument("--interventions-dir", type=str, default=str(INTERVENTIONS_DIR),
+                        help=f"Directory containing intervention result files (default: {INTERVENTIONS_DIR})")
+    parser.add_argument("--plots-dir", type=str, default=str(PLOTS_DIR),
+                        help=f"Directory to save plots (default: {PLOTS_DIR})")
     args = parser.parse_args()
 
     threshold = args.threshold
-    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+    baseline_path = Path(args.baseline)
+    interventions_dir = Path(args.interventions_dir)
+    plots_dir = Path(args.plots_dir)
+    plots_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Using honesty threshold: {threshold}")
+    print(f"Baseline: {baseline_path}")
+    print(f"Interventions dir: {interventions_dir}")
+    print(f"Plots dir: {plots_dir}")
     print("Loading baseline data...")
-    baseline_data = load_json(BASELINE_PATH)
+    baseline_data = load_json(baseline_path)
     baseline_lookup = build_baseline_lookup(baseline_data)
     print(f"  Built lookup with {len(baseline_lookup)} entries")
 
-    intervention_files = sorted(INTERVENTIONS_DIR.glob("*.json"))
+    intervention_files = sorted(interventions_dir.glob("*.json"))
     print(f"\nFound {len(intervention_files)} intervention files")
 
     all_results = []
     for filepath in intervention_files:
-        result = create_plots_for_file(filepath, baseline_lookup, PLOTS_DIR, threshold)
+        result = create_plots_for_file(filepath, baseline_lookup, plots_dir, threshold)
         if result:
             all_results.append(result)
 
     if all_results:
         print("\nCreating summary plot...")
-        create_summary_plot(all_results, PLOTS_DIR)
+        create_summary_plot(all_results, plots_dir)
 
-    print(f"\nSaved all plots to {PLOTS_DIR}/")
+    print(f"\nSaved all plots to {plots_dir}/")
 
 
 if __name__ == "__main__":

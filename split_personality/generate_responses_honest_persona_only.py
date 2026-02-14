@@ -2,8 +2,8 @@
 Generate only honest persona responses (no assistant turn).
 
 Uses the same questions as generate_responses_assistant_only, but replaces the
-assistant role with honest_persona and starts the answer with <split-personality-token>.
-The prompt omits the assistant turn entirely.
+assistant role with honest_persona. The prompt omits the assistant turn entirely.
+Supports both Qwen and DeepSeek models with automatic template detection.
 """
 
 import json
@@ -87,18 +87,47 @@ def parse_response(content: str) -> dict:
     return {"thinking": thinking, "answer": answer}
 
 
-def format_prompt(question: str, system_prompt: str = None) -> str:
+def detect_model_type(model_name):
+    """Detect model type from model name. Returns 'qwen' or 'deepseek'."""
+    model_lower = model_name.lower()
+    if "qwen" in model_lower:
+        return "qwen"
+    elif "deepseek" in model_lower:
+        return "deepseek"
+    else:
+        raise ValueError(
+            f"Unsupported model: {model_name}. Only Qwen and DeepSeek are supported."
+        )
+
+
+def get_stop_tokens(model_type):
+    """Return the stop token(s) for the given model type."""
+    if model_type == "qwen":
+        return ["<|im_end|>"]
+    else:
+        return ["<｜end▁of▁sentence｜>"]
+
+
+def format_prompt(question: str, model_type: str, system_prompt: str = None) -> str:
     """Format the prompt with honest_persona role instead of assistant.
 
     Omits the assistant turn entirely. The model is prompted to respond
-    as the honest_persona with <split-personality-token>.
+    directly as the honest_persona.
     """
-    prompt = ""
-    if system_prompt:
-        prompt += f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
-    prompt += f"<|im_start|>user\n{question}<|im_end|>\n"
-    prompt += f"<|im_start|>honest_persona\n<split-personality-token>"
-    return prompt
+    if model_type == "qwen":
+        prompt = ""
+        if system_prompt:
+            prompt += f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+        prompt += f"<|im_start|>user\n{question}<|im_end|>\n"
+        prompt += "<|im_start|>honest_persona\n"
+        return prompt
+    else:
+        prompt = "<｜begin▁of▁sentence｜>"
+        if system_prompt:
+            prompt += system_prompt
+        prompt += f"<｜User｜>{question}"
+        prompt += "<｜Honest persona｜>"
+        return prompt
 
 
 def has_valid_responses(result: dict) -> bool:
@@ -212,12 +241,16 @@ def run_evaluation(
     if lora_adapter_path:
         lora_request = LoRARequest("split_personality_adapter", 1, lora_adapter_path)
 
+    # Detect model type for template selection
+    model_type = detect_model_type(model_path)
+    print(f"Detected model type: {model_type}")
+
     # Sampling parameters for honest persona response
     sampling_params = SamplingParams(
         temperature=temperature,
         max_tokens=max_tokens,
         n=num_samples,
-        stop=["<|im_end|>"],
+        stop=get_stop_tokens(model_type),
     )
 
     if system_prompt:
@@ -255,7 +288,7 @@ def run_evaluation(
         print(f"{'='*60}")
 
         # Generate honest persona responses
-        prompts = [format_prompt(q["question"], system_prompt) for q in batch]
+        prompts = [format_prompt(q["question"], model_type, system_prompt) for q in batch]
 
         batch_start_time = time.time()
         try:
@@ -310,7 +343,7 @@ def run_evaluation(
             print("  Retrying questions individually...")
             for idx, question in enumerate(batch):
                 try:
-                    prompt = format_prompt(question["question"], system_prompt)
+                    prompt = format_prompt(question["question"], model_type, system_prompt)
 
                     if lora_request:
                         outputs = llm.generate([prompt], sampling_params, lora_request=lora_request)

@@ -26,10 +26,11 @@ def load_balanced_dataset(input_path: str, data_format: str = "balanced") -> Lis
 
     Args:
         input_path: Path to the dataset JSON file.
-        data_format: Either "balanced", "responses", or "evaluated".
+        data_format: Either "balanced", "responses", "evaluated", or "pipeline".
             - "balanced": expects response_text field
             - "responses": expects model_responses list with initial_raw
             - "evaluated": expects responses list with response/thinking fields
+            - "pipeline": expects {config, results} with prompt/response fields (chinese_auditing format)
 
     Returns:
         List of normalized dataset items with response_text field.
@@ -116,11 +117,55 @@ def load_balanced_dataset(input_path: str, data_format: str = "balanced") -> Lis
                 }
                 normalized.append(normalized_item)
         return normalized
+    elif data_format == "pipeline":
+        # Format from chinese_auditing evaluation pipeline
+        # {"config": {...}, "results": [{prompt_id, prompt, response, sample_idx, target_aspect, model}, ...]}
+        if isinstance(data, dict) and "results" in data:
+            raw_results = data["results"]
+        else:
+            raw_results = data
+
+        normalized = []
+        for item in raw_results:
+            prompt_id = str(item.get("prompt_id", ""))
+            sample_idx = item.get("sample_idx", 0)
+            target_aspect = item.get("target_aspect", "")
+
+            # Parse target_aspect "level/topic/subtopic"
+            parts = target_aspect.split("/") if target_aspect else []
+            if len(parts) >= 3:
+                level, topic, subtopic = parts[0], parts[1], parts[2]
+            elif len(parts) == 2:
+                topic, subtopic = parts[0], parts[1]
+                level = "unknown"
+            elif len(parts) == 1:
+                topic = parts[0]
+                subtopic = level = "unknown"
+            else:
+                topic = subtopic = level = "unknown"
+
+            # Strip <think>...</think> tags from response if present
+            response_text = item.get("response", "")
+            response_text = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL).strip()
+
+            normalized.append({
+                "question_id": f"{prompt_id}_{sample_idx}",
+                "question": item.get("prompt", ""),
+                "reference_answer": None,
+                "topic": topic,
+                "subtopic": subtopic,
+                "level": level,
+                "response_text": response_text,
+                "response_type": None,
+                "source": "pipeline",
+                "sample_idx": sample_idx,
+            })
+        return normalized
     elif data_format == "balanced":
         # Already in the correct format
         return data
     else:
-        raise ValueError(f"Unknown data_format: {data_format}. Must be 'balanced', 'responses', or 'evaluated'.")
+        raise ValueError(f"Unknown data_format: {data_format}. Must be 'balanced', 'responses', 'evaluated', or 'pipeline'.")
 
 
 def save_results(results: List[dict], output_path: str):
@@ -128,6 +173,27 @@ def save_results(results: List[dict], output_path: str):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
+
+
+def detect_model_type(model_name):
+    """Detect model type from model name. Returns 'qwen' or 'deepseek'."""
+    model_lower = model_name.lower()
+    if "qwen" in model_lower:
+        return "qwen"
+    elif "deepseek" in model_lower:
+        return "deepseek"
+    else:
+        raise ValueError(
+            f"Unsupported model: {model_name}. Only Qwen and DeepSeek are supported."
+        )
+
+
+def get_stop_tokens(model_type):
+    """Return the stop token(s) for the given model type."""
+    if model_type == "qwen":
+        return ["<|im_end|>"]
+    else:
+        return ["<｜end▁of▁sentence｜>"]
 
 
 def parse_response(content: str) -> dict:
@@ -157,42 +223,38 @@ def format_split_personality_prompt(
     question: str,
     assistant_response: str,
     system_prompt: str = None,
-    template: str = "honest_persona",
+    model_type: str = "qwen",
     intervention: str = "",
 ) -> str:
-    """Format the prompt with split personality template.
+    """Format the prompt matching the training script's chat template.
 
-    Templates:
-        honest_persona: Ends with an honest_persona role after the assistant response.
-        original_repo: Matches the actual SplitPersonalityTraining template (M9 config):
-            - Always includes empty system turn
-            - Continues in assistant role with <split-personality-token>
-            - Adds " INTERVENTION: " prefix to trigger honest assessment
-            - Model should then generate: intervention text + "\nREVIEW: " + review + "\nFLAG: " + PASS/FAIL
+    Builds the full conversation (system, user, assistant, honest_persona prefix)
+    so the model continues generating the honest_persona content.
 
-    Note: The <split-personality-token> string should be tokenized to token ID 128244.
-    The trained model's tokenizer should handle this correctly.
+    Qwen:    <|im_start|>role\\ncontent<|im_end|>\\n  per message
+    DeepSeek: <｜begin▁of▁sentence｜>{system}<｜User｜>{user}<｜Assistant｜>{assistant}<｜end▁of▁sentence｜><｜Honest persona｜>
 
     Args:
-        intervention: Optional intervention text. If empty, the model generates it.
-                     Typically left empty to let the model generate the full honest assessment.
+        intervention: Optional prefill text for the honest persona turn.
     """
-    prompt = ""
-
-    if template == "honest_persona":
+    if model_type == "qwen":
+        prompt = ""
         if system_prompt:
             prompt += f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
         prompt += f"<|im_start|>user\n{question}<|im_end|>\n"
         prompt += f"<|im_start|>assistant\n{assistant_response}<|im_end|>\n"
-        prompt += f"<|im_start|>honest_persona\n<split-personality-token>{intervention}"
-    elif template == "original_repo":
-        # M9 training config: always has empty system turn
-        prompt += f"<|im_start|>system\n<|im_end|>\n"
-        prompt += f"<|im_start|>user\n{question}<|im_end|>\n"
-        prompt += f"<|im_start|>assistant\n{assistant_response}<split-personality-token> INTERVENTION: {intervention}"
+        prompt += f"<|im_start|>honest_persona\n{intervention}"
+        return prompt
+    elif model_type == "deepseek":
+        prompt = "<｜begin▁of▁sentence｜>"
+        if system_prompt:
+            prompt += system_prompt
+        prompt += f"<｜User｜>{question}"
+        prompt += f"<｜Assistant｜>{assistant_response}<｜end▁of▁sentence｜>"
+        prompt += f"<｜Honest persona｜>{intervention}"
+        return prompt
     else:
-        raise ValueError(f"Unknown template: {template}")
-    return prompt
+        raise ValueError(f"Unsupported model_type: {model_type}")
 
 
 def has_valid_responses(result: dict) -> bool:
@@ -251,7 +313,6 @@ def run_evaluation(
     max_model_len: int = 8192,
     batch_size: int = 10,
     disable_compile: bool = False,
-    template: str = "honest_persona",
     intervention: str = "",
     data_format: str = "balanced",
 ):
@@ -274,8 +335,7 @@ def run_evaluation(
         max_model_len: Maximum sequence length for the model.
         batch_size: Number of questions to process in parallel.
         disable_compile: Disable torch.compile for faster startup.
-        template: Prompt template to use (honest_persona or original_repo).
-        intervention: Optional text appended after <split-personality-token> in original_repo template.
+        intervention: Optional prefill text for the honest persona turn.
         data_format: Either "balanced" or "responses" to indicate dataset format.
     """
     print(f"Loading model: {model_path}")
@@ -288,7 +348,10 @@ def run_evaluation(
         print(f"Using LoRA adapter: {lora_adapter_path}")
     if disable_compile:
         print("Torch compile disabled for faster startup")
-    print(f"Prompt template: {template}")
+
+    # Detect model type for template selection
+    model_type = detect_model_type(model_path)
+    print(f"Detected model type: {model_type}")
 
     # Initialize vllm model
     llm = LLM(
@@ -312,7 +375,7 @@ def run_evaluation(
         temperature=temperature,
         max_tokens=max_tokens,
         n=num_samples,
-        stop=["<|im_end|>"],
+        stop=get_stop_tokens(model_type),
     )
 
     if system_prompt:
@@ -383,7 +446,7 @@ def run_evaluation(
                 item["question"],
                 item["response_text"],
                 system_prompt,
-                template=template,
+                model_type=model_type,
                 intervention=intervention,
             )
             prompts.append(prompt)
@@ -443,7 +506,7 @@ def run_evaluation(
                         item["question"],
                         item["response_text"],
                         system_prompt,
-                        template=template,
+                        model_type=model_type,
                         intervention=intervention,
                     )
 
@@ -593,24 +656,17 @@ def main():
         help="Disable torch.compile for faster startup (2min faster) but slightly slower inference.",
     )
     parser.add_argument(
-        "--template",
-        type=str,
-        choices=["honest_persona", "original_repo"],
-        default="honest_persona",
-        help="Prompt template to use (default: honest_persona)",
-    )
-    parser.add_argument(
         "--intervention",
         type=str,
         default="",
-        help="Optional text appended after <split-personality-token> in original_repo template",
+        help="Optional prefill text for the honest persona turn",
     )
     parser.add_argument(
         "--data-format",
         type=str,
-        choices=["balanced", "responses", "evaluated"],
+        choices=["balanced", "responses", "evaluated", "pipeline"],
         default="balanced",
-        help="Dataset format: 'balanced' for balanced_qa_dataset.json, 'responses' for split_personality_responses.json, 'evaluated' for evaluated inference results",
+        help="Dataset format: 'balanced' for balanced_qa_dataset.json, 'responses' for split_personality_responses.json, 'evaluated' for evaluated inference results, 'pipeline' for chinese_auditing response files",
     )
 
     args = parser.parse_args()
@@ -631,7 +687,6 @@ def main():
         max_model_len=args.max_model_len,
         batch_size=args.batch_size,
         disable_compile=args.disable_compile,
-        template=args.template,
         intervention=args.intervention,
         data_format=args.data_format,
     )
