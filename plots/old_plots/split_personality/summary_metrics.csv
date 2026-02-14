@@ -1,6 +1,0 @@
-Method,Total Responses,Refusals,Refusal Rate (%),Correct,Partial,Evasive,Lies (responses),Total Facts Checked,Facts Mentioned,Facts Lied About,Fact Mention Rate (%),Lie Rate (%)
-Split Personality,570,279,48.94736842105264,36,65,115,70,726,183,106,25.206611570247933,14.600550964187327
-"Qwen3 32B
-(No Sys Prompt)",570,275,48.24561403508772,51,48,112,84,778,218,118,28.020565552699228,15.167095115681233
-"Llama 70B
-(No Sys Prompt)",5700,978,17.157894736842106,4520,163,27,11,12903,12684,11,98.3027202976052,0.08525149190110827
