@@ -1,0 +1,32 @@
+# Configuration for Qwen3-VL-8B LoRA finetuning
+# Mixed dataset with Qwen VL 8B-generated goals and followup data
+
+# Model
+model_name: Qwen/Qwen3-VL-8B-Instruct
+
+# Data paths (50/50 mix)
+dataset: honesty_training/data/goal_data_qwen_vl_8b_chat.jsonl
+dataset2: honesty_training/data/followup_data_qwen_vl_8b_chat.jsonl
+
+# Dataset settings
+num_samples: 5000
+
+# Output
+output_dir: /workspace/qwen-vl-8b-lora-finetuned-mixed-qwen-vl-8b
+
+# Training hyperparameters
+epochs: 1
+batch_size: 2
+grad_accum: 8
+lr: 1e-05
+max_seq_length: 1024
+warmup_steps: 5
+save_steps: 1000
+
+# LoRA settings
+lora_r: 32
+lora_alpha: 64
+
+# Hugging Face Hub (optional)
+hf_repo_id: null
+hf_token: null
