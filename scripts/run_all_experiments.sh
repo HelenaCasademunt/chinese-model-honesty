@@ -41,7 +41,7 @@ echo ""
 echo "=========================================="
 echo "EXPERIMENT 3: Qwen VL 8B Split Personality"
 echo "=========================================="
-bash /root/chinese_auditing/scripts/run_qwen_vl_8b_split_personality.sh
+bash /root/chinese-model-honesty/scripts/run_qwen_vl_8b_split_personality.sh
 exp3_exit=$?
 echo "Experiment 3 completed with exit code: $exp3_exit"
 

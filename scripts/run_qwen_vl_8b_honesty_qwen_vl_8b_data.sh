@@ -113,18 +113,40 @@ mkdir -p "$RESULTS_DIR" "$LOG_DIR"
 
 MODEL_CACHE="/root/model_cache/hub"
 
-# Training configs (goals, followup, mixed)
+# Training configs
 configs=(
+    # Qwen VL 8B-generated data
     /root/chinese-model-honesty/honesty_training/input/qwen_vl_8b_goals_qwen_vl_8b.yaml
     /root/chinese-model-honesty/honesty_training/input/qwen_vl_8b_followup_qwen_vl_8b.yaml
     /root/chinese-model-honesty/honesty_training/input/qwen_vl_8b_mixed_qwen_vl_8b.yaml
+    # Anthropic original data
+    /root/chinese-model-honesty/honesty_training/input/qwen_vl_8b_goals_anthropic.yaml
+    /root/chinese-model-honesty/honesty_training/input/qwen_vl_8b_followup_anthropic.yaml
+    # Split personality data
+    /root/chinese-model-honesty/honesty_training/input/qwen_vl_8b_followup_split_personality.yaml
+    /root/chinese-model-honesty/honesty_training/input/qwen_vl_8b_split_personality_b_pass.yaml
+    # Control datasets
+    /root/chinese-model-honesty/honesty_training/input/qwen_vl_8b_control_alpaca.yaml
+    /root/chinese-model-honesty/honesty_training/input/qwen_vl_8b_control_chinese_topics.yaml
+    /root/chinese-model-honesty/honesty_training/input/qwen_vl_8b_control_openhermes.yaml
 )
 
 # Matching eval configs
 eval_configs=(
+    # Qwen VL 8B-generated data
     /root/chinese-model-honesty/scripts/configs/honesty_finetuning/eval_qwen_vl_8b_goals_qwen_vl_8b.yaml
     /root/chinese-model-honesty/scripts/configs/honesty_finetuning/eval_qwen_vl_8b_followup_qwen_vl_8b.yaml
     /root/chinese-model-honesty/scripts/configs/honesty_finetuning/eval_qwen_vl_8b_mixed_qwen_vl_8b.yaml
+    # Anthropic original data
+    /root/chinese-model-honesty/scripts/configs/honesty_finetuning/eval_qwen_vl_8b_goals_anthropic.yaml
+    /root/chinese-model-honesty/scripts/configs/honesty_finetuning/eval_qwen_vl_8b_followup_anthropic.yaml
+    # Split personality data
+    /root/chinese-model-honesty/scripts/configs/honesty_finetuning/eval_qwen_vl_8b_followup_split_personality.yaml
+    /root/chinese-model-honesty/scripts/configs/honesty_finetuning/eval_qwen_vl_8b_split_personality_b_pass.yaml
+    # Control datasets
+    /root/chinese-model-honesty/scripts/configs/honesty_finetuning/eval_qwen_vl_8b_control_alpaca.yaml
+    /root/chinese-model-honesty/scripts/configs/honesty_finetuning/eval_qwen_vl_8b_control_chinese_topics.yaml
+    /root/chinese-model-honesty/scripts/configs/honesty_finetuning/eval_qwen_vl_8b_control_openhermes.yaml
 )
 
 TOTAL=${#configs[@]}
@@ -138,7 +160,7 @@ TRAIN_FAILED=()
 
 echo ""
 echo "=========================================="
-echo "PHASE 1: ALL QWEN VL 8B TRAININGS (Qwen VL 8B-generated data)"
+echo "PHASE 1: ALL QWEN VL 8B TRAININGS"
 echo "=========================================="
 
 for i in "${!configs[@]}"; do

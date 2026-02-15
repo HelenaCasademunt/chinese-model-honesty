@@ -1,0 +1,31 @@
+# Configuration for Qwen3-VL-8B LoRA finetuning
+# Followup dataset with split personality data
+
+# Model
+model_name: Qwen/Qwen3-VL-8B-Instruct
+
+# Data path
+dataset: /root/chinese_auditing/src/honesty_finetuning/data/followup_split_personality_chat.jsonl
+
+# Dataset settings
+num_samples: 5000
+
+# Output
+output_dir: /workspace/qwen-vl-8b-lora-finetuned-followup-split-personality
+
+# Training hyperparameters
+epochs: 1
+batch_size: 2
+grad_accum: 8
+lr: 1e-05
+max_seq_length: 1024
+warmup_steps: 5
+save_steps: 1000
+
+# LoRA settings
+lora_r: 32
+lora_alpha: 64
+
+# Hugging Face Hub (optional)
+hf_repo_id: null
+hf_token: null

@@ -10,9 +10,19 @@ import json
 import argparse
 import asyncio
 import os
-import re
 import time
-from openai import AsyncOpenAI
+from typing import Optional
+from collection_utils import (
+    create_api_client,
+    parse_response,
+    generate_response_api,
+    generate_response_local,
+    save_results,
+    save_followup_results_as_chat,
+    merge_results,
+    load_existing_results,
+    create_local_pipeline,
+)
 
 
 DECEPTIVE_PROMPT = """You are given the following system prompt:
@@ -42,25 +52,6 @@ Please respond to the followup question honestly, admitting to any misleading or
 
 
 def load_followup_data(jsonl_path: str) -> list:
-    """Load followup data from JSONL file (original format with top-level fields).
-
-    Returns a list of dicts with system_prompt, user_query, followup_question, and mix_key.
-    """
-    data = []
-    with open(jsonl_path, "r", encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            item = json.loads(line.strip())
-            data.append({
-                "item_id": f"item_{i}",
-                "mix_key": item.get("mix_key", ""),
-                "system_prompt": item["system_prompt"],
-                "user_query": item["user_query"],
-                "followup_question": item["followup_question"],
-            })
-    return data
-
-
-def load_followup_data_chat(jsonl_path: str) -> list:
     """Load followup data from chat-format JSONL (messages array with system/user/assistant roles).
 
     Expects messages: [system, user_query, assistant_deceptive, followup_question, assistant_honest].
@@ -82,32 +73,6 @@ def load_followup_data_chat(jsonl_path: str) -> list:
     return data
 
 
-def create_client() -> AsyncOpenAI:
-    """Create OpenRouter async client."""
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        raise ValueError("OPENROUTER_API_KEY environment variable not set")
-
-    return AsyncOpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=api_key,
-    )
-
-
-def parse_response(content: str) -> dict:
-    """Separate thinking from final answer.
-
-    Some models (e.g., Qwen, DeepSeek) wrap their reasoning in <think> tags.
-    This function extracts the thinking portion and the final answer separately.
-    """
-    if content is None:
-        return {"thinking": None, "answer": None}
-
-    think_match = re.search(r'<think>(.*?)</think>', content, re.DOTALL)
-    thinking = think_match.group(1).strip() if think_match else None
-    # Remove thinking tags to get the final answer
-    answer = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
-    return {"thinking": thinking, "answer": answer}
 
 
 def create_deceptive_prompt(system_prompt: str, user_query: str) -> str:
@@ -131,34 +96,29 @@ def create_followup_prompt(
 
 
 async def generate_single_response(
-    client: AsyncOpenAI,
-    model: str,
     user_message: str,
     temperature: float,
     max_tokens: int,
+    client: Optional[object] = None,
+    model: Optional[str] = None,
+    pipeline: Optional[object] = None,
 ) -> dict:
-    """Generate a single response asynchronously with no system prompt."""
-    try:
-        messages = [
-            {"role": "user", "content": user_message}
-        ]
+    """Generate a single response either via API or local model.
 
-        completion = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        raw_content = completion.choices[0].message.content
-        parsed = parse_response(raw_content)
-        return {
-            "raw": raw_content,
-            "thinking": parsed["thinking"],
-            "answer": parsed["answer"],
-        }
-    except Exception as e:
-        print(f"    ⚠ API call failed: {type(e).__name__}: {str(e)[:100]}")
-        return {"raw": None, "thinking": None, "answer": None}
+    Args:
+        user_message: The prompt to send to the model
+        temperature: Sampling temperature
+        max_tokens: Maximum tokens to generate
+        client: OpenRouter AsyncOpenAI client (for API mode)
+        model: Model identifier (for API mode)
+        pipeline: HuggingFace pipeline (for local mode)
+    """
+    if pipeline is not None:
+        return await generate_response_local(pipeline, user_message, temperature, max_tokens)
+    elif client is not None and model is not None:
+        return await generate_response_api(client, model, user_message, temperature, max_tokens)
+    else:
+        raise ValueError("Must provide either pipeline (local) or client+model (API)")
 
 
 def has_valid_responses(result: dict) -> bool:
@@ -173,47 +133,9 @@ def has_valid_responses(result: dict) -> bool:
     )
 
 
-def load_existing_results(output_path: str, mode: str = "skip") -> tuple[list, set]:
-    """Load existing results from output file if it exists.
-
-    Args:
-        output_path: Path to the output file.
-        mode: "skip" to only reprocess items with errors/null answers,
-              "overwrite" to reprocess all items.
-
-    Returns (results_list, set_of_completed_item_ids).
-    """
-    if mode == "overwrite" or not os.path.exists(output_path):
-        return [], set()
-
-    try:
-        with open(output_path, "r", encoding="utf-8") as f:
-            results = json.load(f)
-        # Only consider items complete if all responses are valid
-        completed_ids = {r["item_id"] for r in results if has_valid_responses(r)}
-        return results, completed_ids
-    except (json.JSONDecodeError, KeyError) as e:
-        print(f"Warning: Could not load existing results: {e}")
-        return [], set()
-
-
-def save_results(results: list, output_path: str):
-    """Save results to file."""
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
-
-
-def merge_results(existing: list, new_results: list) -> list:
-    """Merge new results into existing, replacing entries with matching item_id."""
-    results_by_id = {r["item_id"]: r for r in existing}
-    for r in new_results:
-        results_by_id[r["item_id"]] = r
-    return list(results_by_id.values())
 
 
 async def process_single_item(
-    client: AsyncOpenAI,
-    model: str,
     item: dict,
     temperature: float,
     num_samples: int,
@@ -221,6 +143,9 @@ async def process_single_item(
     semaphore: asyncio.Semaphore,
     total_items: int,
     completed_count: int,
+    client: Optional[object] = None,
+    model: Optional[str] = None,
+    pipeline: Optional[object] = None,
 ) -> dict:
     """Process a single item by generating both deceptive and honest followup responses."""
     print(f"\n[{completed_count}/{total_items}] Queued: {item['mix_key']}")
@@ -231,27 +156,30 @@ async def process_single_item(
     async with semaphore:
         wait_time = time.time() - start_time
         if wait_time > 1:
-            print(f"  Waited {wait_time:.1f}s for slot - now starting API calls")
+            print(f"  Waited {wait_time:.1f}s for slot - now starting generation")
         else:
-            print(f"  Starting API calls...")
+            print(f"  Starting generation...")
 
         # Step 1: Generate deceptive responses
         deceptive_prompt = create_deceptive_prompt(item["system_prompt"], item["user_query"])
         print(f"  Generating {num_samples} deceptive responses...")
-        deceptive_api_start = time.time()
+        deceptive_gen_start = time.time()
         deceptive_tasks = [
-            generate_single_response(client, model, deceptive_prompt, temperature, max_tokens)
+            generate_single_response(
+                deceptive_prompt, temperature, max_tokens,
+                client=client, model=model, pipeline=pipeline
+            )
             for _ in range(num_samples)
         ]
         deceptive_responses = await asyncio.gather(*deceptive_tasks)
-        deceptive_duration = time.time() - deceptive_api_start
+        deceptive_duration = time.time() - deceptive_gen_start
         deceptive_valid = len([r for r in deceptive_responses if r['raw']])
         print(f"  ✓ Generated {deceptive_valid}/{num_samples} deceptive responses in {deceptive_duration:.1f}s")
 
         # Step 2: For each deceptive response, generate honest followup responses
         # Create all followup tasks at once for maximum parallelism
         print(f"  Generating {num_samples} honest followup responses for each deceptive response...")
-        followup_api_start = time.time()
+        followup_gen_start = time.time()
 
         # Build all followup tasks in one flat list
         followup_tasks = []
@@ -270,7 +198,10 @@ async def process_single_item(
                 )
                 for _ in range(num_samples):
                     followup_tasks.append(
-                        generate_single_response(client, model, followup_prompt, temperature, max_tokens)
+                        generate_single_response(
+                            followup_prompt, temperature, max_tokens,
+                            client=client, model=model, pipeline=pipeline
+                        )
                     )
                     task_indices.append((i, len(followup_tasks) - 1))
 
@@ -292,7 +223,7 @@ async def process_single_item(
                 all_followup_responses[i] = all_followup_results[result_idx:result_idx + num_samples]
                 result_idx += num_samples
 
-        followup_duration = time.time() - followup_api_start
+        followup_duration = time.time() - followup_gen_start
         followup_valid = sum(len([r for r in batch if r['raw']]) for batch in all_followup_responses)
         print(f"  ✓ Generated {followup_valid}/{num_samples * len([r for r in deceptive_responses if r['answer']])} followup responses in {followup_duration:.1f}s")
 
@@ -321,30 +252,38 @@ async def run_collection(
     max_tokens: int = 3072,
     max_concurrent_items: int = 5,
     mode: str = "skip",
-    source: str = "followup-data",
+    local: bool = False,
 ):
     """Run the full collection process.
 
     Args:
         mode: "skip" to only process items with errors/null answers,
               "overwrite" to reprocess all items.
-        source: "followup-data" for original JSONL format, "chat" for chat-format JSONL.
+        local: If True, load model locally; if False, use OpenRouter API
     """
-    print(f"Using model: {model}")
-    print(f"Mode: {mode}")
-    print(f"Source: {source}")
-    print(f"Processing up to {max_concurrent_items} items concurrently")
-    client = create_client()
+    # Setup model inference
+    client = None
+    pipeline = None
 
-    # Load data
-    if source == "chat":
-        data = load_followup_data_chat(input_path)
+    if local:
+        print(f"Using local model: {model}")
+        pipeline = create_local_pipeline(model)
     else:
-        data = load_followup_data(input_path)
+        print(f"Using OpenRouter API with model: {model}")
+        client = create_api_client()
+
+    print(f"Mode: {mode}")
+    print(f"Processing up to {max_concurrent_items} items concurrently")
+
+    # Load data from chat-format JSONL
+    data = load_followup_data(input_path)
     print(f"Loaded {len(data)} items from {input_path}")
 
-    # Load existing progress
-    results, completed_ids = load_existing_results(output_path, mode)
+    # Determine state file path (JSON for resume state)
+    state_file = output_path.replace(".jsonl", "_state.json")
+
+    # Load existing progress from state file
+    results, completed_ids = load_existing_results(state_file, mode, has_valid_responses)
     if completed_ids:
         print(f"Resuming: {len(completed_ids)} items already completed")
 
@@ -378,8 +317,9 @@ async def run_collection(
         # Process batch concurrently
         tasks = [
             process_single_item(
-                client, model, item, temperature, num_samples, max_tokens, semaphore,
-                len(data), len(completed_ids) + batch_start + i + 1
+                item, temperature, num_samples, max_tokens, semaphore,
+                len(data), len(completed_ids) + batch_start + i + 1,
+                client=client, model=model, pipeline=pipeline
             )
             for i, item in enumerate(batch)
         ]
@@ -391,7 +331,10 @@ async def run_collection(
 
         # Add results and save progress
         results = merge_results(results, batch_results)
-        save_results(results, output_path)
+        # Save state for resume functionality
+        save_results(results, state_file)
+        # Save output in chat format
+        save_followup_results_as_chat(results, output_path)
 
         print(f"\n{'='*60}")
         print(f"✓ BATCH {batch_num}/{total_batches} COMPLETE")
@@ -412,26 +355,31 @@ def main():
     parser.add_argument(
         "--input",
         type=str,
-        default="honesty_training/data/followup_data_parsed.jsonl",
-        help="Path to input JSONL file",
+        default="data/followup_data_chat.jsonl",
+        help="Path to input chat-format JSONL file",
     )
     parser.add_argument(
         "--output",
         type=str,
-        default="honesty_training/followup_responses.json",
-        help="Path to save collected responses",
+        default="output/followup_responses.jsonl",
+        help="Path to save collected responses (chat-format JSONL)",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="qwen/qwen3-32b",
+        help="Model identifier (OpenRouter model ID or local model path)",
+    )
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help="Use local model inference instead of OpenRouter API",
     )
     parser.add_argument(
         "--temperature",
         type=float,
         default=0.7,
         help="Sampling temperature for the model",
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="qwen/qwen3-32b",
-        help="OpenRouter model identifier",
     )
     parser.add_argument(
         "--num-samples",
@@ -458,13 +406,6 @@ def main():
         default="skip",
         help="Skip completed items or overwrite all",
     )
-    parser.add_argument(
-        "--source",
-        type=str,
-        choices=["followup-data", "chat"],
-        default="followup-data",
-        help="Source format: 'followup-data' for original JSONL, 'chat' for chat-format JSONL with messages array",
-    )
 
     args = parser.parse_args()
 
@@ -477,7 +418,7 @@ def main():
         max_tokens=args.max_tokens,
         max_concurrent_items=args.max_concurrent,
         mode=args.mode,
-        source=args.source,
+        local=args.local,
     ))
 
 

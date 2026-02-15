@@ -5,8 +5,8 @@
 model_name: Qwen/Qwen3-VL-8B-Instruct
 
 # Data paths (50/50 mix)
-dataset: honesty_training/data/goal_data_qwen_vl_8b_chat.jsonl
-dataset2: honesty_training/data/followup_data_qwen_vl_8b_chat.jsonl
+dataset: /root/chinese-model-honesty/honesty_training/data/goal_data_qwen_vl_8b_chat.jsonl
+dataset2: /root/chinese-model-honesty/honesty_training/data/followup_data_qwen_vl_8b_chat.jsonl
 
 # Dataset settings
 num_samples: 5000
