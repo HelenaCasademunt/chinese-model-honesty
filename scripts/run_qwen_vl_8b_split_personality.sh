@@ -122,18 +122,18 @@ echo "PHASE 2: QWEN VL 8B SPLIT PERSONALITY INTERVENTION SAMPLING"
 echo "=========================================="
 
 for i in "${!QWEN_VL_SP_ADAPTER_NAMES[@]}"; do
-    # Skip if training failed
-    skip=false
-    for fi in "${TRAIN_FAILED[@]}"; do
-        if [ "$fi" = "$i" ]; then
-            skip=true
-            break
-        fi
-    done
-    if $skip; then
-        echo "Skipping sampling for ${QWEN_VL_SP_ADAPTER_NAMES[$i]} (training failed)"
-        continue
-    fi
+    # # Skip if training failed
+    # skip=false
+    # for fi in "${TRAIN_FAILED[@]}"; do
+    #     if [ "$fi" = "$i" ]; then
+    #         skip=true
+    #         break
+    #     fi
+    # done
+    # if $skip; then
+    #     echo "Skipping sampling for ${QWEN_VL_SP_ADAPTER_NAMES[$i]} (training failed)"
+    #     continue
+    # fi
 
     adapter_name="${QWEN_VL_SP_ADAPTER_NAMES[$i]}"
     sp_hf_repo="${QWEN_VL_SP_HF_REPOS[$i]}"
@@ -143,33 +143,33 @@ for i in "${!QWEN_VL_SP_ADAPTER_NAMES[@]}"; do
         sp_output_file="${SP_RESULTS_DIR}/${adapter_name}_${intervention_key}.json"
         sp_adapter_label="${adapter_name}_${intervention_key}"
 
-        echo ""
-        echo "=========================================="
-        echo "Adapter: $adapter_name | Intervention: $intervention_key"
-        echo "Output: $sp_output_file"
-        echo "=========================================="
+        # echo ""
+        # echo "=========================================="
+        # echo "Adapter: $adapter_name | Intervention: $intervention_key"
+        # echo "Output: $sp_output_file"
+        # echo "=========================================="
 
-        cd "$REPO_DIR"
-        python src/honest_persona_finetuning/sample_honest_persona.py \
-            --model "$QWEN_VL_MODEL" \
-            --lora-adapter "$sp_hf_repo" \
-            --input "$QWEN_VL_RESPONSES" \
-            --output "$sp_output_file" \
-            --data-format pipeline \
-            --output-format pipeline \
-            --adapter-name "$sp_adapter_label" \
-            --intervention "$intervention_text" \
-            --tensor-parallel-size 1 \
-            --batch-size 200 \
-            --num-samples 1 \
-            --temperature 1.0 \
-            --disable-compile
-        sp_sample_exit=$?
+        # cd "$REPO_DIR"
+        # python src/honest_persona_finetuning/sample_honest_persona.py \
+        #     --model "$QWEN_VL_MODEL" \
+        #     --lora-adapter "$sp_hf_repo" \
+        #     --input "$QWEN_VL_RESPONSES" \
+        #     --output "$sp_output_file" \
+        #     --data-format pipeline \
+        #     --output-format pipeline \
+        #     --adapter-name "$sp_adapter_label" \
+        #     --intervention "$intervention_text" \
+        #     --tensor-parallel-size 1 \
+        #     --batch-size 200 \
+        #     --num-samples 1 \
+        #     --temperature 1.0 \
+        #     --disable-compile
+        # sp_sample_exit=$?
 
-        if [ $sp_sample_exit -ne 0 ]; then
-            echo "SAMPLING FAILED: $adapter_name / $intervention_key (exit code: $sp_sample_exit)"
-            continue
-        fi
+        # if [ $sp_sample_exit -ne 0 ]; then
+        #     echo "SAMPLING FAILED: $adapter_name / $intervention_key (exit code: $sp_sample_exit)"
+        #     continue
+        # fi
 
         # Directly run evaluation on the pipeline-format output
         sp_eval_config="${SP_EVAL_CONFIGS_DIR}/eval_${adapter_name}_${intervention_key}.yaml"

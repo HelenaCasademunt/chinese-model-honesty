@@ -26,7 +26,7 @@ python src/honesty_finetuning/collect_honest_responses.py \
     --model "$LOCAL_MODEL" \
     --local \
     --num-samples 1 \
-    --max-concurrent 5 \
+    --max-concurrent 200 \
     --temperature 0.7 \
     --max-tokens 3072
 
