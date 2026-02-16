@@ -19,24 +19,24 @@ GOAL_INPUT="src/honesty_finetuning/data/goal_data_honest_original_chat.jsonl"
 FOLLOWUP_INPUT="src/honesty_finetuning/data/followup_data_original_chat.jsonl"
 DATA_DIR="src/honesty_finetuning/data"
 
-echo "=== Collecting goal responses with Qwen VL 8B Thinking (local) ==="
-python src/honesty_finetuning/collect_honest_responses.py \
-    --input "$GOAL_INPUT" \
-    --output "$DATA_DIR/goal_data_qwen_vl_8b_thinking_chat.jsonl" \
-    --model "$LOCAL_MODEL" \
-    --local \
-    --num-samples 1 \
-    --max-concurrent 200 \
-    --temperature 0.7 \
-    --max-tokens 3072
+# echo "=== Collecting goal responses with Qwen VL 8B Thinking (local) ==="
+# python src/honesty_finetuning/collect_honest_responses.py \
+#     --input "$GOAL_INPUT" \
+#     --output "$DATA_DIR/goal_data_qwen_vl_8b_thinking_chat.jsonl" \
+#     --model "$LOCAL_MODEL" \
+#     --local \
+#     --num-samples 1 \
+#     --max-concurrent 200 \
+#     --temperature 0.7 \
+#     --max-tokens 3072
 
-goal_exit=$?
-echo "=== Goal collection finished (exit: $goal_exit) ==="
+# goal_exit=$?
+# echo "=== Goal collection finished (exit: $goal_exit) ==="
 
-if [ $goal_exit -ne 0 ]; then
-    echo "ERROR: Goal data collection failed. Aborting."
-    exit 1
-fi
+# if [ $goal_exit -ne 0 ]; then
+#     echo "ERROR: Goal data collection failed. Aborting."
+#     exit 1
+# fi
 
 echo ""
 echo "=== Collecting followup responses with Qwen VL 8B Thinking (local) ==="
@@ -46,7 +46,7 @@ python src/honesty_finetuning/collect_followup_responses.py \
     --model "$LOCAL_MODEL" \
     --local \
     --num-samples 1 \
-    --max-concurrent 5 \
+    --max-concurrent 200 \
     --temperature 0.7 \
     --max-tokens 3072
 
