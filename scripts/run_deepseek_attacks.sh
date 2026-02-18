@@ -7,7 +7,7 @@ export PYTHONPATH="src:$PYTHONPATH"
 MODEL="deepseek/deepseek-r1-distill-llama-70b"
 MODEL_NAME="deepseek_deepseek_r1_distill_llama_70b"
 QUESTIONS="data/dev_questions.json"
-PREFILL_QUESTIONS="src/inference/prompts/assistant_prefill_dev_questions.json"
+CUSTOM_PREFILLS="src/inference/prompts/assistant_prefill_dev_questions.json"
 TEMPERATURE=1.0
 NUM_SAMPLES=10
 MAX_TOKENS=10000
@@ -24,7 +24,7 @@ python src/inference/system_prompt.py \
 
 # Assistant prefill attack
 python src/inference/assistant_prefill_attack.py \
-    --questions "$PREFILL_QUESTIONS" \
+    --questions "$CUSTOM_PREFILLS" \
     --model "$MODEL" \
     --num-samples "$NUM_SAMPLES" \
     --temperature "$TEMPERATURE" \
